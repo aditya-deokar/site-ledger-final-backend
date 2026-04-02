@@ -1,0 +1,250 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                  String    @id @default(cuid())
+  email               String    @unique
+  passwordHash        String
+  firstName           String?
+  lastName            String?
+  passwordResetToken  String?
+  passwordResetExpiry DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  company             Company?
+}
+
+model Company {
+  id          String              @id @default(cuid())
+  name        String
+  address     String?
+  createdBy   String              @unique
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  owner       User                @relation(fields: [createdBy], references: [id])
+  withdrawals CompanyWithdrawal[]
+  customers   Customer[]
+  investors   Investor[]
+  partners    Partner[]
+  payments    Payment[]
+  sites       Site[]
+  vendors     Vendor[]
+}
+
+model Partner {
+  id               String   @id @default(cuid())
+  companyId        String
+  name             String
+  email            String?
+  phone            String?
+  investmentAmount Float    @default(0)
+  stakePercentage  Float    @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  company          Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+model Site {
+  id          String     @id @default(cuid())
+  companyId   String
+  name        String
+  address     String
+  projectType String     @default("NEW_CONSTRUCTION")
+  totalFloors Int?
+  totalFlats  Int?
+  slug        String     @unique
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  customers   Customer[]
+  expenses    Expense[]
+  floors      Floor[]
+  investors   Investor[]
+  payments    Payment[]
+  company     Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  funds       SiteFund[]
+}
+
+model SiteFund {
+  id        String   @id @default(cuid())
+  siteId    String
+  amount    Float
+  note      String?
+  createdAt DateTime @default(now())
+  site      Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+}
+
+model Vendor {
+  id        String     @id @default(cuid())
+  companyId String
+  name      String
+  type      VendorType
+  phone     String?
+  email     String?
+  isDeleted Boolean    @default(false)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  expenses  Expense[]
+  company   Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+model Expense {
+  id          String      @id @default(cuid())
+  siteId      String
+  type        ExpenseType
+  reason      String?
+  vendorId    String?
+  description String?
+  amount        Float
+  amountPaid    Float         @default(0)
+  paymentDate   DateTime?
+  paymentStatus PaymentStatus @default(PENDING)
+  isDeleted     Boolean       @default(false)
+  createdAt     DateTime      @default(now())
+  site          Site          @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  vendor        Vendor?       @relation(fields: [vendorId], references: [id])
+}
+
+model Floor {
+  id          String   @id @default(cuid())
+  siteId      String
+  floorNumber Int
+  createdAt   DateTime @default(now())
+  floorName   String?
+  flats       Flat[]
+  site        Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+}
+
+model Flat {
+  id           String     @id @default(cuid())
+  floorId      String
+  siteId       String
+  flatNumber   Int?
+  status       FlatStatus @default(AVAILABLE)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  customFlatId String?
+  flatType     String     @default("CUSTOMER")
+  customer     Customer?
+  floor        Floor      @relation(fields: [floorId], references: [id], onDelete: Cascade)
+}
+
+model Customer {
+  id            String   @id @default(cuid())
+  flatId        String?  @unique
+  siteId        String?
+  companyId     String
+  name          String
+  phone         String?
+  email         String?
+  customerType String   @default("CUSTOMER")
+  sellingPrice  Float
+  bookingAmount Float
+  amountPaid    Float
+  isDeleted     Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  flat          Flat?    @relation(fields: [flatId], references: [id])
+  site          Site?    @relation(fields: [siteId], references: [id])
+}
+
+model Investor {
+  id               String                @id @default(cuid())
+  companyId        String
+  siteId           String?
+  name             String
+  phone            String?
+  type             InvestorType
+  equityPercentage Float?
+  fixedRate        Float?
+  totalInvested    Float                 @default(0)
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  totalReturned    Float                 @default(0)
+  isClosed         Boolean               @default(false)
+  isDeleted        Boolean               @default(false)
+  company          Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  site             Site?                 @relation(fields: [siteId], references: [id])
+  transactions     InvestorTransaction[]
+}
+
+model InvestorTransaction {
+  id         String   @id @default(cuid())
+  investorId String
+  amount        Float
+  amountPaid    Float         @default(0)
+  paymentDate   DateTime?
+  paymentStatus PaymentStatus @default(PENDING)
+  note          String?
+  isDeleted     Boolean       @default(false)
+  createdAt     DateTime      @default(now())
+  investor      Investor      @relation(fields: [investorId], references: [id], onDelete: Cascade)
+}
+
+model CompanyWithdrawal {
+  id        String   @id @default(cuid())
+  companyId String
+  amount        Float
+  amountPaid    Float         @default(0)
+  paymentDate   DateTime?
+  paymentStatus PaymentStatus @default(PENDING)
+  note          String?
+  isDeleted     Boolean       @default(false)
+  createdAt     DateTime      @default(now())
+  company       Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+model Payment {
+  id          String   @id @default(cuid())
+  companyId   String
+  siteId      String?
+  entityType  String
+  entityId    String
+  amount      Float
+  note        String?
+  createdAt   DateTime @default(now())
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  site        Site?    @relation(fields: [siteId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([companyId])
+  @@index([siteId])
+}
+
+enum ExpenseType {
+  GENERAL
+  VENDOR
+}
+
+enum VendorType {
+  ELECTRICIAN
+  PLUMBER
+  SUPPLIER
+  PAINTER
+  ARCHITECT
+}
+
+enum FlatStatus {
+  AVAILABLE
+  BOOKED
+  SOLD
+}
+
+enum InvestorType {
+  EQUITY
+  FIXED_RATE
+}
+
+enum PaymentStatus {
+  PENDING
+  PARTIAL
+  COMPLETED
+}

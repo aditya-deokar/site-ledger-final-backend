@@ -1,0 +1,15 @@
+node_modules
+dist
+.env
+.prisma
+/prisma/migrations
+/.vscode
+.DS_Store
+.idea
+*.env.local
+*.env.development
+*.env.test
+*.env.production
+
+# Ignore the features doc
+features.md
