@@ -11,5 +11,5 @@ dist
 *.env.test
 *.env.production
 
-# Ignore the features doc
+# Ignore the features
 features.md
