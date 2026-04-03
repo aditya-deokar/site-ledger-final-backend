@@ -1,3 +1,0 @@
-ALTER TABLE "Vendor"
-ALTER COLUMN "type" TYPE TEXT
-USING "type"::TEXT;
