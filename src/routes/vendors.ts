@@ -14,18 +14,18 @@ vendorRoutes.use('*', requireJwt)
 
 // ── Schemas ──────────────────────────────────────────
 
-const vendorTypeEnum = z.enum(['ELECTRICIAN', 'PLUMBER', 'SUPPLIER', 'PAINTER', 'ARCHITECT'])
+const vendorTypeSchema = z.string().trim().min(1)
 
 const createVendorSchema = z.object({
   name: z.string().min(1),
-  type: vendorTypeEnum,
+  type: vendorTypeSchema,
   phone: z.string().optional(),
   email: z.string().email().optional(),
 })
 
 const updateVendorSchema = z.object({
   name: z.string().min(1).optional(),
-  type: vendorTypeEnum.optional(),
+  type: vendorTypeSchema.optional(),
   phone: z.string().optional(),
   email: z.string().email().optional(),
 })
@@ -55,7 +55,7 @@ const getVendorsRoute = createRoute({
   security: [{ bearerAuth: [] }],
   request: {
     query: z.object({
-      type: vendorTypeEnum.optional(),
+      type: vendorTypeSchema.optional(),
     }),
   },
   responses: {
@@ -120,7 +120,7 @@ const createVendorRoute = createRoute({
   path: '/',
   tags: ['Vendors'],
   summary: 'Create a vendor',
-  description: 'Add a new vendor with name and type (ELECTRICIAN, PLUMBER, SUPPLIER, PAINTER, ARCHITECT).',
+  description: 'Add a new vendor with name and any non-empty vendor type.',
   security: [{ bearerAuth: [] }],
   request: {
     body: {
