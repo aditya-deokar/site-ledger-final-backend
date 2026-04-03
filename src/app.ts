@@ -40,7 +40,7 @@ export const app = new OpenAPIHono()
 app.use('*', requestId)
 app.use('*', pinoLogger)
 app.use('*', cors({
-  origin: ['http://localhost:3000', 'http://localhost:5173'],
+  origin: ['http://localhost:3000', 'http://localhost:5173', 'https://www.sitesledger.app', 'https://www.siteledger.app'],
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
