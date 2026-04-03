@@ -85,7 +85,7 @@ model Vendor {
   id        String     @id @default(cuid())
   companyId String
   name      String
-  type      VendorType
+  type      String
   phone     String?
   email     String?
   isDeleted Boolean    @default(false)
@@ -222,14 +222,6 @@ model Payment {
 enum ExpenseType {
   GENERAL
   VENDOR
-}
-
-enum VendorType {
-  ELECTRICIAN
-  PLUMBER
-  SUPPLIER
-  PAINTER
-  ARCHITECT
 }
 
 enum FlatStatus {
