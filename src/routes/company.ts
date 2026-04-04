@@ -1,15 +1,25 @@
+import { Prisma } from '@prisma/client'
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi'
 import type { AuthContext } from '../types/auth.js'
 import { prisma } from '../db/prisma.js'
 import { requireJwt } from '../middlewares/jwt.js'
 import { jsonError, jsonOk } from '../utils/response.js'
-import { getCompanyPartnerFund, getCompanyFixedRateInvestorFund, getCompanyFixedRateReturned, getTotalAllocatedFund, getCompanyAvailableFund, getCompanyTotalWithdrawals } from '../utils/fund.js'
+import { createLedgerEntry } from '../services/ledger.service.js'
+import {
+  deriveCompanyWithdrawalPaymentStatus,
+  getCompanyWithdrawalPaidTotal,
+  getCompanyWithdrawalRemaining,
+  mapCompanyWithdrawalLedgerFields,
+} from '../services/company-withdrawal-ledger.service.js'
+import { getPartnerPaidTotal, sumDirectionalLedgerAmounts } from '../services/ledger-read.service.js'
+import { getCompanyPartnerFund, getCompanyFixedRateInvestorFund, getCompanyAvailableFund } from '../utils/ledger-fund.js'
 import { invalidatePartnerCaches, invalidateWithdrawalCaches, invalidateCompanyCaches } from '../services/cache-invalidation.js'
 import { getCompanyForUser } from '../utils/company.js'
 import { cacheService } from '../services/cache.service.js'
 import { CacheKeys, CacheTTL } from '../config/cache-keys.js'
 
 export const companyRoutes = new OpenAPIHono<{ Variables: AuthContext['Variables'] }>()
+const LEDGER_TX_OPTIONS = { maxWait: 15000, timeout: 20000 } as const
 
 // Apply JWT middleware to all company routes
 companyRoutes.use('*', requireJwt)
@@ -46,6 +56,54 @@ const errorResponseSchema = z.object({
   ok: z.literal(false),
   error: z.string(),
 })
+
+const withdrawalResponseSchema = z.object({
+  id: z.string(),
+  amount: z.number(),
+  note: z.string().nullable(),
+  amountPaid: z.number(),
+  remaining: z.number(),
+  paymentDate: z.string().datetime().nullable(),
+  paymentStatus: z.enum(['PENDING', 'PARTIAL', 'COMPLETED']),
+  createdAt: z.string().datetime(),
+})
+
+async function getCompanyWithdrawalForUser(withdrawalId: string, userId: string) {
+  const company = await getCompanyForUser(userId)
+  if (!company) return { company: null, withdrawal: null }
+
+  const withdrawal = await prisma.companyWithdrawal.findFirst({
+    where: { id: withdrawalId, companyId: company.id, isDeleted: false },
+    include: {
+      ledgerEntries: {
+        select: { amount: true, postedAt: true },
+        orderBy: { postedAt: 'desc' },
+      },
+    },
+  })
+
+  return { company, withdrawal }
+}
+
+function mapPartnerResponse(
+  partner: {
+    id: string
+    name: string
+    email: string | null
+    phone: string | null
+    stakePercentage: number
+    ledgerEntries: Array<{ amount: Prisma.Decimal | number | string; direction: 'IN' | 'OUT' }>
+  },
+) {
+  return {
+    id: partner.id,
+    name: partner.name,
+    email: partner.email,
+    phone: partner.phone,
+    investmentAmount: sumDirectionalLedgerAmounts(partner.ledgerEntries),
+    stakePercentage: partner.stakePercentage,
+  }
+}
 
 // ── POST /company ────────────────────────────────────
 
@@ -186,7 +244,15 @@ companyRoutes.openapi(getCompanyRoute, async (c) => {
   // Cache miss — do full query with partners
   const companyWithPartners = await prisma.company.findUnique({
     where: { id: company.id },
-    include: { partners: true },
+    include: {
+      partners: {
+        include: {
+          ledgerEntries: {
+            select: { amount: true, direction: true },
+          },
+        },
+      },
+    },
   })
   if (!companyWithPartners) return jsonError(c, 'No company found', 404) as any
 
@@ -208,14 +274,7 @@ companyRoutes.openapi(getCompanyRoute, async (c) => {
     investor_fund: investorFund,
     total_fund: totalFund,
     available_fund: availableFund,
-    partners: companyWithPartners.partners.map((p) => ({
-      id: p.id,
-      name: p.name,
-      email: p.email,
-      phone: p.phone,
-      investmentAmount: p.investmentAmount,
-      stakePercentage: p.stakePercentage,
-    })),
+    partners: companyWithPartners.partners.map(mapPartnerResponse),
   }
   await cacheService.set(cacheKey, responseData, CacheTTL.COMPANY_PROFILE)
   return jsonOk(c, responseData) as any
@@ -341,6 +400,13 @@ const withdrawSchema = z.object({
   note: z.string().optional(),
   amountPaid: z.number().min(0).optional().default(0),
   paymentDate: z.string().datetime().optional(),
+  idempotencyKey: z.string().optional(),
+})
+
+const withdrawalPaymentSchema = z.object({
+  amount: z.number().positive(),
+  note: z.string().optional(),
+  idempotencyKey: z.string().optional(),
 })
 
 const companyWithdrawRoute = createRoute({
@@ -360,15 +426,7 @@ const companyWithdrawRoute = createRoute({
           schema: z.object({
             ok: z.literal(true),
             data: z.object({
-              withdrawal: z.object({
-                id: z.string(),
-                amount: z.number(),
-                note: z.string().nullable(),
-                amountPaid: z.number(),
-                paymentDate: z.string().datetime().nullable(),
-                paymentStatus: z.enum(['PENDING', 'PARTIAL', 'COMPLETED']),
-                createdAt: z.string().datetime(),
-              }),
+              withdrawal: withdrawalResponseSchema,
               availableFund: z.number(),
             }),
           }),
@@ -397,11 +455,15 @@ companyRoutes.openapi(companyWithdrawRoute, async (c) => {
   if (!company) return jsonError(c, 'No company found', 404) as any
 
   const availableFund = await getCompanyAvailableFund(company.id)
-  if (parsed.data.amount > availableFund) {
-    return jsonError(c, `Withdrawal amount (${parsed.data.amount}) exceeds available fund (${availableFund})`, 400) as any
+  const { amount, note, amountPaid = 0, paymentDate, idempotencyKey } = parsed.data
+
+  if (amountPaid > amount) {
+    return jsonError(c, 'AMOUNT_EXCEEDS_LIMIT', 400) as any
   }
 
-  const { amount, note, amountPaid = 0, paymentDate } = parsed.data
+  if (amountPaid > availableFund) {
+    return jsonError(c, 'INSUFFICIENT_FUNDS', 400) as any
+  }
 
   const result = await prisma.$transaction(async (tx: any) => {
     const withdrawal = await tx.companyWithdrawal.create({
@@ -409,43 +471,334 @@ companyRoutes.openapi(companyWithdrawRoute, async (c) => {
         companyId: company.id,
         amount,
         note,
-        amountPaid,
-        paymentDate: paymentDate ? new Date(paymentDate) : null,
-        paymentStatus: amountPaid >= amount ? 'COMPLETED' : amountPaid > 0 ? 'PARTIAL' : 'PENDING',
       },
     })
 
+    let initialPaymentDate: string | null = null
     if (amountPaid > 0) {
-      await tx.payment.create({
-        data: {
-          companyId: company.id,
-          entityType: 'COMPANY_WITHDRAWAL',
-          entityId: withdrawal.id,
-          amount: amountPaid,
-          note: note || 'Initial withdrawal payment',
-        },
-      })
+      const payment = await createLedgerEntry({
+        companyId: company.id,
+        walletType: 'COMPANY',
+        direction: 'OUT',
+        movementType: 'COMPANY_WITHDRAWAL',
+        amount: new Prisma.Decimal(amountPaid),
+        idempotencyKey: idempotencyKey ?? `company-withdrawal:${withdrawal.id}:${Date.now()}`,
+        postedAt: paymentDate ? new Date(paymentDate) : undefined,
+        note: note || 'Initial withdrawal payment',
+        companyWithdrawalId: withdrawal.id,
+      }, tx)
+      initialPaymentDate = payment.postedAt.toISOString()
     }
-    return withdrawal
-  })
 
-  const withdrawal = result
+    const paidTotal = await getCompanyWithdrawalPaidTotal(withdrawal.id, tx)
+    const remaining = await getCompanyWithdrawalRemaining(withdrawal.id, tx)
+
+    return { withdrawal, paidTotal, remaining, initialPaymentDate }
+  }, LEDGER_TX_OPTIONS)
 
   await invalidateWithdrawalCaches(company.id)
 
   const newAvailableFund = await getCompanyAvailableFund(company.id)
+  const paymentStatus = deriveCompanyWithdrawalPaymentStatus(result.withdrawal.amount, result.paidTotal)
+
+  return jsonOk(c, {
+    withdrawal: {
+      id: result.withdrawal.id,
+      amount: result.withdrawal.amount,
+      note: result.withdrawal.note,
+      amountPaid: result.paidTotal,
+      remaining: result.remaining,
+      paymentDate: result.initialPaymentDate,
+      paymentStatus,
+      createdAt: result.withdrawal.createdAt.toISOString(),
+    },
+    availableFund: newAvailableFund,
+  }) as any
+})
+
+const getWithdrawalsRoute = createRoute({
+  method: 'get',
+  path: '/withdrawals',
+  tags: ['Company'],
+  summary: 'List company withdrawals',
+  security: [{ bearerAuth: [] }],
+  responses: {
+    200: {
+      content: {
+        'application/json': {
+          schema: z.object({
+            ok: z.literal(true),
+            data: z.object({
+              withdrawals: z.array(withdrawalResponseSchema),
+            }),
+          }),
+        },
+      },
+      description: 'Company withdrawals',
+    },
+    404: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: 'No company found',
+    },
+  },
+})
+
+companyRoutes.openapi(getWithdrawalsRoute, async (c) => {
+  const auth = c.get('auth')
+  const company = await getCompanyForUser(auth.userId)
+  if (!company) return jsonError(c, 'No company found', 404) as any
+
+  const cacheKey = CacheKeys.companyWithdrawalList(company.id)
+  const cached = await cacheService.get<any>(cacheKey)
+  if (cached) return jsonOk(c, cached) as any
+
+  const withdrawals = await prisma.companyWithdrawal.findMany({
+    where: { companyId: company.id, isDeleted: false },
+    include: {
+      ledgerEntries: {
+        select: { amount: true, postedAt: true },
+        orderBy: { postedAt: 'desc' },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+  })
+
+  const responseData = {
+    withdrawals: withdrawals.map((withdrawal) => {
+      const derived = mapCompanyWithdrawalLedgerFields(withdrawal.amount, withdrawal.ledgerEntries)
+      return {
+        id: withdrawal.id,
+        amount: withdrawal.amount,
+        note: withdrawal.note,
+        amountPaid: derived.amountPaid,
+        remaining: derived.remaining,
+        paymentDate: derived.paymentDate,
+        paymentStatus: derived.paymentStatus,
+        createdAt: withdrawal.createdAt.toISOString(),
+      }
+    }),
+  }
+
+  await cacheService.set(cacheKey, responseData, CacheTTL.ENTITY_LIST)
+  return jsonOk(c, responseData) as any
+})
+
+const getWithdrawalDetailRoute = createRoute({
+  method: 'get',
+  path: '/withdrawals/{id}',
+  tags: ['Company'],
+  summary: 'Get company withdrawal detail',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: {
+      content: {
+        'application/json': {
+          schema: z.object({
+            ok: z.literal(true),
+            data: z.object({
+              withdrawal: withdrawalResponseSchema,
+            }),
+          }),
+        },
+      },
+      description: 'Withdrawal detail',
+    },
+    404: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: 'Withdrawal not found',
+    },
+  },
+})
+
+companyRoutes.openapi(getWithdrawalDetailRoute, async (c) => {
+  const auth = c.get('auth')
+  const { id } = c.req.valid('param')
+  const { withdrawal } = await getCompanyWithdrawalForUser(id, auth.userId)
+  if (!withdrawal) return jsonError(c, 'Withdrawal not found', 404) as any
+
+  const derived = mapCompanyWithdrawalLedgerFields(withdrawal.amount, withdrawal.ledgerEntries)
 
   return jsonOk(c, {
     withdrawal: {
       id: withdrawal.id,
       amount: withdrawal.amount,
       note: withdrawal.note,
-      amountPaid: withdrawal.amountPaid,
-      paymentDate: withdrawal.paymentDate ? withdrawal.paymentDate.toISOString() : null,
-      paymentStatus: withdrawal.paymentStatus,
+      amountPaid: derived.amountPaid,
+      remaining: derived.remaining,
+      paymentDate: derived.paymentDate,
+      paymentStatus: derived.paymentStatus,
       createdAt: withdrawal.createdAt.toISOString(),
     },
-    availableFund: newAvailableFund,
+  }) as any
+})
+
+const addWithdrawalPaymentRoute = createRoute({
+  method: 'patch',
+  path: '/withdrawals/{id}/payment',
+  tags: ['Company'],
+  summary: 'Record a company withdrawal payment',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ id: z.string() }),
+    body: {
+      content: {
+        'application/json': {
+          schema: withdrawalPaymentSchema,
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      content: {
+        'application/json': {
+          schema: z.object({
+            ok: z.literal(true),
+            data: z.object({
+              withdrawal: z.object({
+                id: z.string(),
+                amountPaid: z.number(),
+                remaining: z.number(),
+                paymentStatus: z.enum(['PENDING', 'PARTIAL', 'COMPLETED']),
+              }),
+              payment: z.object({
+                id: z.string(),
+                amount: z.number(),
+                createdAt: z.string().datetime(),
+              }),
+              availableFund: z.number(),
+            }),
+          }),
+        },
+      },
+      description: 'Withdrawal payment recorded',
+    },
+    400: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: 'Invalid payload',
+    },
+    404: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: 'Withdrawal not found',
+    },
+  },
+})
+
+companyRoutes.openapi(addWithdrawalPaymentRoute, async (c) => {
+  const auth = c.get('auth')
+  const { id } = c.req.valid('param')
+  const { amount, note, idempotencyKey } = c.req.valid('json')
+
+  const { company, withdrawal } = await getCompanyWithdrawalForUser(id, auth.userId)
+  if (!company || !withdrawal) return jsonError(c, 'Withdrawal not found', 404) as any
+
+  const availableFund = await getCompanyAvailableFund(company.id)
+  if (amount > availableFund) {
+    return jsonError(c, 'INSUFFICIENT_FUNDS', 400) as any
+  }
+
+  const currentPaid = await getCompanyWithdrawalPaidTotal(withdrawal.id)
+  const newTotal = currentPaid + amount
+  if (newTotal > withdrawal.amount) {
+    return jsonError(c, 'AMOUNT_EXCEEDS_LIMIT', 400) as any
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    const payment = await createLedgerEntry({
+      companyId: company.id,
+      walletType: 'COMPANY',
+      direction: 'OUT',
+      movementType: 'COMPANY_WITHDRAWAL',
+      amount: new Prisma.Decimal(amount),
+      idempotencyKey: idempotencyKey ?? `company-withdrawal-payment:${withdrawal.id}:${Date.now()}`,
+      note: note || 'Withdrawal payment',
+      companyWithdrawalId: withdrawal.id,
+    }, tx)
+
+    const amountPaid = await getCompanyWithdrawalPaidTotal(withdrawal.id, tx)
+    const remaining = await getCompanyWithdrawalRemaining(withdrawal.id, tx)
+    const paymentStatus = deriveCompanyWithdrawalPaymentStatus(withdrawal.amount, amountPaid)
+
+    return { payment, amountPaid, remaining, paymentStatus }
+  }, LEDGER_TX_OPTIONS)
+
+  await invalidateWithdrawalCaches(company.id)
+
+  return jsonOk(c, {
+    withdrawal: {
+      id: withdrawal.id,
+      amountPaid: result.amountPaid,
+      remaining: result.remaining,
+      paymentStatus: result.paymentStatus,
+    },
+    payment: {
+      id: result.payment.id,
+      amount: Number(result.payment.amount),
+      createdAt: result.payment.postedAt,
+    },
+    availableFund: await getCompanyAvailableFund(company.id),
+  }) as any
+})
+
+const getWithdrawalPaymentsRoute = createRoute({
+  method: 'get',
+  path: '/withdrawals/{id}/payments',
+  tags: ['Payments'],
+  summary: 'Get company withdrawal payment history',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: {
+      content: {
+        'application/json': {
+          schema: z.object({
+            ok: z.literal(true),
+            data: z.object({
+              payments: z.array(z.object({
+                id: z.string(),
+                amount: z.number(),
+                note: z.string().nullable(),
+                createdAt: z.string().datetime(),
+              })),
+            }),
+          }),
+        },
+      },
+      description: 'Withdrawal payment history',
+    },
+    404: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: 'Withdrawal not found',
+    },
+  },
+})
+
+companyRoutes.openapi(getWithdrawalPaymentsRoute, async (c) => {
+  const auth = c.get('auth')
+  const { id } = c.req.valid('param')
+  const { company, withdrawal } = await getCompanyWithdrawalForUser(id, auth.userId)
+  if (!company || !withdrawal) return jsonError(c, 'Withdrawal not found', 404) as any
+
+  const payments = await prisma.payment.findMany({
+    where: {
+      companyId: company.id,
+      companyWithdrawalId: withdrawal.id,
+    },
+    orderBy: { postedAt: 'desc' },
+  })
+
+  return jsonOk(c, {
+    payments: payments.map((payment) => ({
+      id: payment.id,
+      amount: Number(payment.amount),
+      note: payment.note,
+      createdAt: payment.postedAt,
+    })),
   }) as any
 })
 
@@ -503,87 +856,106 @@ companyRoutes.openapi(getActivityRoute, async (c) => {
   const cached = await cacheService.get<any>(cacheKey)
   if (cached) return jsonOk(c, cached) as any
 
-  // Fetch more than needed per source so we have enough after merging
   const fetchLimit = limit + 5
-  const dateFilter = cursor ? { lt: new Date(cursor) } : undefined
-  const dateWhere = dateFilter ? { createdAt: dateFilter } : {}
+  const payments = await prisma.payment.findMany({
+    where: {
+      companyId: company.id,
+      ...(cursor ? { postedAt: { lt: new Date(cursor) } } : {}),
+      OR: [
+        { companyWithdrawalId: { not: null } },
+        {
+          walletType: 'COMPANY',
+          movementType: { in: ['COMPANY_TO_SITE_TRANSFER', 'SITE_TO_COMPANY_TRANSFER'] },
+        },
+        { investorTransactionId: { not: null } },
+        { expenseId: { not: null } },
+      ],
+    },
+    orderBy: { postedAt: 'desc' },
+    take: fetchLimit,
+    include: {
+      site: { select: { name: true } },
+      companyWithdrawal: { select: { note: true } },
+      investorTransaction: {
+        select: {
+          note: true,
+          kind: true,
+          investor: { select: { name: true } },
+        },
+      },
+      expense: {
+        select: {
+          description: true,
+          site: { select: { name: true } },
+        },
+      },
+    },
+  })
 
-  const [withdrawals, siteFunds, investorTxs, expenses] = await Promise.all([
-    prisma.companyWithdrawal.findMany({
-      where: { companyId: company.id, isDeleted: false, ...dateWhere },
-      orderBy: { createdAt: 'desc' },
-      take: fetchLimit,
-    }),
-    prisma.siteFund.findMany({
-      where: { site: { companyId: company.id }, ...dateWhere },
-      orderBy: { createdAt: 'desc' },
-      take: fetchLimit,
-      include: { site: { select: { name: true } } },
-    }),
-    prisma.investorTransaction.findMany({
-      where: { investor: { companyId: company.id, isDeleted: false }, ...dateWhere },
-      orderBy: { createdAt: 'desc' },
-      take: fetchLimit,
-      include: { investor: { select: { name: true, type: true } } },
-    }),
-    prisma.expense.findMany({
-      where: { site: { companyId: company.id }, ...dateWhere },
-      orderBy: { createdAt: 'desc' },
-      take: fetchLimit,
-      include: { site: { select: { name: true } } },
-    }),
-  ])
-
-  const activities = [
-    ...withdrawals.map((w) => ({
-      id: w.id,
-      type: 'withdrawal' as const,
-      amount: -w.amount,
-      description: w.note || 'Company withdrawal',
-      date: w.createdAt,
-    })),
-    ...siteFunds.map((sf) => ({
-      id: sf.id,
-      type: 'site_fund' as const,
-      amount: sf.amount,
-      description: sf.amount > 0
-        ? `Fund allocated to ${sf.site.name}`
-        : `Fund pulled from ${sf.site.name}`,
-      date: sf.createdAt,
-    })),
-    ...investorTxs.map((tx) => ({
-      id: tx.id,
-      type: 'investor_tx' as const,
-      amount: tx.amount,
-      description: tx.amount > 0
-        ? `${tx.investor.name} invested`
-        : tx.note?.toLowerCase().includes('interest')
-          ? `Interest paid to ${tx.investor.name}`
-          : `Returned to ${tx.investor.name}`,
-      date: tx.createdAt,
-    })),
-    ...expenses.map((e) => ({
-      id: e.id,
-      type: 'expense' as const,
-      amount: -e.amount,
-      description: `${e.description} — ${e.site.name}`,
-      date: e.createdAt,
-    })),
-  ]
-
-  activities.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-
-  const page = activities.slice(0, limit)
-  const hasMore = activities.length > limit
+  const page = payments.slice(0, limit)
+  const hasMore = payments.length > limit
   const nextCursor = hasMore && page.length > 0
-    ? (page[page.length - 1].date instanceof Date ? (page[page.length - 1].date as unknown as Date).toISOString() : page[page.length - 1].date as unknown as string)
+    ? page[page.length - 1].postedAt.toISOString()
     : null
 
   const responseData = {
-    activities: page.map((a) => ({
-      ...a,
-      date: a.date instanceof Date ? a.date.toISOString() : a.date,
-    })),
+    activities: page.map((payment) => {
+      if (payment.companyWithdrawalId) {
+        return {
+          id: payment.id,
+          type: 'withdrawal' as const,
+          amount: -Number(payment.amount),
+          description: payment.note || payment.companyWithdrawal?.note || 'Company withdrawal',
+          date: payment.postedAt.toISOString(),
+        }
+      }
+
+      if (payment.walletType === 'COMPANY' && payment.movementType === 'COMPANY_TO_SITE_TRANSFER') {
+        return {
+          id: payment.id,
+          type: 'site_fund' as const,
+          amount: Number(payment.amount),
+          description: `Fund allocated to ${payment.site?.name ?? 'site'}`,
+          date: payment.postedAt.toISOString(),
+        }
+      }
+
+      if (payment.walletType === 'COMPANY' && payment.movementType === 'SITE_TO_COMPANY_TRANSFER') {
+        return {
+          id: payment.id,
+          type: 'site_fund' as const,
+          amount: -Number(payment.amount),
+          description: `Fund pulled from ${payment.site?.name ?? 'site'}`,
+          date: payment.postedAt.toISOString(),
+        }
+      }
+
+      if (payment.investorTransactionId) {
+        const investorName = payment.investorTransaction?.investor.name ?? 'Investor'
+
+        return {
+          id: payment.id,
+          type: 'investor_tx' as const,
+          amount: payment.movementType === 'INVESTOR_PRINCIPAL_IN'
+            ? Number(payment.amount)
+            : -Number(payment.amount),
+          description: payment.movementType === 'INVESTOR_PRINCIPAL_IN'
+            ? `${investorName} invested`
+            : payment.movementType === 'INVESTOR_INTEREST'
+              ? `Interest paid to ${investorName}`
+              : `Returned to ${investorName}`,
+          date: payment.postedAt.toISOString(),
+        }
+      }
+
+      return {
+        id: payment.id,
+        type: 'expense' as const,
+        amount: -Number(payment.amount),
+        description: `${payment.expense?.description ?? 'Expense'} - ${payment.expense?.site.name ?? 'site'}`,
+        date: payment.postedAt.toISOString(),
+      }
+    }),
     nextCursor,
   }
   await cacheService.set(cacheKey, responseData, CacheTTL.ACTIVITY_FEED)
@@ -653,7 +1025,7 @@ companyRoutes.openapi(getCompanyExpensesRoute, async (c) => {
 
   const [expenses, total] = await Promise.all([
     prisma.expense.findMany({
-      where: { site: { companyId: company.id } },
+      where: { site: { companyId: company.id }, isDeleted: false },
       orderBy: { createdAt: 'desc' },
       skip,
       take: limit,
@@ -662,7 +1034,7 @@ companyRoutes.openapi(getCompanyExpensesRoute, async (c) => {
         vendor: { select: { name: true } },
       },
     }),
-    prisma.expense.count({ where: { site: { companyId: company.id } } }),
+    prisma.expense.count({ where: { site: { companyId: company.id }, isDeleted: false } }),
   ])
 
   const responseData = {
@@ -746,16 +1118,43 @@ companyRoutes.openapi(addPartnerRoute, async (c) => {
     return jsonError(c, 'No company found. Create one first.', 404) as any
   }
 
-  const partner = await prisma.partner.create({
-    data: {
-      companyId: company.id,
-      name: parsed.data.name,
-      email: parsed.data.email,
-      phone: parsed.data.phone,
-      investmentAmount: parsed.data.investmentAmount,
-      stakePercentage: parsed.data.stakePercentage,
-    },
-  })
+  const partner = await prisma.$transaction(async (tx) => {
+    const createdPartner = await tx.partner.create({
+      data: {
+        companyId: company.id,
+        name: parsed.data.name,
+        email: parsed.data.email,
+        phone: parsed.data.phone,
+        stakePercentage: parsed.data.stakePercentage,
+      },
+    })
+
+    if (parsed.data.investmentAmount > 0) {
+      await createLedgerEntry({
+        companyId: company.id,
+        walletType: 'COMPANY',
+        direction: 'IN',
+        movementType: 'PARTNER_CAPITAL_IN',
+        amount: new Prisma.Decimal(parsed.data.investmentAmount),
+        idempotencyKey: `partner-create:${createdPartner.id}:capital`,
+        note: 'Initial partner capital',
+        partnerId: createdPartner.id,
+      }, tx)
+    }
+
+    return tx.partner.findUnique({
+      where: { id: createdPartner.id },
+      include: {
+        ledgerEntries: {
+          select: { amount: true, direction: true },
+        },
+      },
+    })
+  }, LEDGER_TX_OPTIONS)
+
+  if (!partner) {
+    return jsonError(c, 'Partner could not be created', 400) as any
+  }
 
   await invalidatePartnerCaches(company.id)
 
@@ -765,7 +1164,7 @@ companyRoutes.openapi(addPartnerRoute, async (c) => {
       name: partner.name,
       email: partner.email,
       phone: partner.phone,
-      investmentAmount: partner.investmentAmount,
+      investmentAmount: sumDirectionalLedgerAmounts(partner.ledgerEntries),
       stakePercentage: partner.stakePercentage,
     },
   }, 201) as any
@@ -828,11 +1227,19 @@ companyRoutes.openapi(getPartnersRoute, async (c) => {
   // Cache miss — fetch partners
   const companyWithPartners = await prisma.company.findUnique({
     where: { id: company.id },
-    include: { partners: true },
+    include: {
+      partners: {
+        include: {
+          ledgerEntries: {
+            select: { amount: true, direction: true },
+          },
+        },
+      },
+    },
   })
   if (!companyWithPartners) return jsonError(c, 'No company found', 404) as any
 
-  const totalFund = companyWithPartners.partners.reduce((sum, p) => sum + p.investmentAmount, 0)
+  const totalFund = await getCompanyPartnerFund(company.id)
 
   const responseData = {
     company: {
@@ -840,14 +1247,7 @@ companyRoutes.openapi(getPartnersRoute, async (c) => {
       name: companyWithPartners.name,
     },
     total_fund: totalFund,
-    partners: companyWithPartners.partners.map((p) => ({
-      id: p.id,
-      name: p.name,
-      email: p.email,
-      phone: p.phone,
-      investmentAmount: p.investmentAmount,
-      stakePercentage: p.stakePercentage,
-    })),
+    partners: companyWithPartners.partners.map(mapPartnerResponse),
   }
   await cacheService.set(cacheKey, responseData, CacheTTL.PARTNER_LIST)
   return jsonOk(c, responseData) as any
@@ -925,10 +1325,48 @@ companyRoutes.openapi(updatePartnerRoute, async (c) => {
     return jsonError(c, 'Partner not found', 404) as any
   }
 
-  const partner = await prisma.partner.update({
-    where: { id },
-    data: parsed.data,
-  })
+  const partner = await prisma.$transaction(async (tx) => {
+    const updatedPartner = await tx.partner.update({
+      where: { id },
+      data: {
+        name: parsed.data.name,
+        email: parsed.data.email,
+        phone: parsed.data.phone,
+        stakePercentage: parsed.data.stakePercentage,
+      },
+    })
+
+    if (parsed.data.investmentAmount !== undefined) {
+      const currentInvestment = await getPartnerPaidTotal(id, tx)
+      const delta = parsed.data.investmentAmount - currentInvestment
+
+      if (delta !== 0) {
+        await createLedgerEntry({
+          companyId: company.id,
+          walletType: 'COMPANY',
+          direction: delta > 0 ? 'IN' : 'OUT',
+          movementType: delta > 0 ? 'PARTNER_CAPITAL_IN' : 'ADJUSTMENT',
+          amount: new Prisma.Decimal(Math.abs(delta)),
+          idempotencyKey: `partner-update:${id}:${Date.now()}`,
+          note: delta > 0 ? 'Partner capital increased' : 'Partner capital adjusted down',
+          partnerId: id,
+        }, tx)
+      }
+    }
+
+    return tx.partner.findUnique({
+      where: { id: updatedPartner.id },
+      include: {
+        ledgerEntries: {
+          select: { amount: true, direction: true },
+        },
+      },
+    })
+  }, LEDGER_TX_OPTIONS)
+
+  if (!partner) {
+    return jsonError(c, 'Partner not found', 404) as any
+  }
 
   await invalidatePartnerCaches(company.id)
 
@@ -938,7 +1376,7 @@ companyRoutes.openapi(updatePartnerRoute, async (c) => {
       name: partner.name,
       email: partner.email,
       phone: partner.phone,
-      investmentAmount: partner.investmentAmount,
+      investmentAmount: sumDirectionalLedgerAmounts(partner.ledgerEntries),
       stakePercentage: partner.stakePercentage,
     },
   }) as any
@@ -993,6 +1431,13 @@ companyRoutes.openapi(deletePartnerRoute, async (c) => {
     return jsonError(c, 'Partner not found', 404) as any
   }
 
+  const ledgerEntryCount = await prisma.payment.count({
+    where: { partnerId: id },
+  })
+  if (ledgerEntryCount > 0) {
+    return jsonError(c, 'Partner has financial history and cannot be deleted', 400) as any
+  }
+
   await prisma.partner.delete({
     where: { id },
   })
@@ -1001,3 +1446,4 @@ companyRoutes.openapi(deletePartnerRoute, async (c) => {
 
   return jsonOk(c, { message: `Partner ${existing.name} removed` }) as any
 })
+

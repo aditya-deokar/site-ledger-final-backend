@@ -7,6 +7,13 @@ import { getCompanyForUser } from '../utils/company.js'
 import { invalidateVendorCaches } from '../services/cache-invalidation.js'
 import { cacheService } from '../services/cache.service.js'
 import { CacheKeys, CacheTTL } from '../config/cache-keys.js'
+import {
+  buildVendorStatement,
+  getVendorExpenseRecords,
+  mapVendorBills,
+  mapVendorPayments,
+  summarizeVendorRecords,
+} from '../services/vendor-accounting.service.js'
 
 export const vendorRoutes = new OpenAPIHono<{ Variables: AuthContext['Variables'] }>()
 
@@ -15,6 +22,7 @@ vendorRoutes.use('*', requireJwt)
 // ── Schemas ──────────────────────────────────────────
 
 const vendorTypeSchema = z.string().trim().min(1)
+const paymentStatusSchema = z.enum(['PENDING', 'PARTIAL', 'COMPLETED'])
 
 const createVendorSchema = z.object({
   name: z.string().min(1),
@@ -39,10 +47,94 @@ const vendorResponseSchema = z.object({
   createdAt: z.string().datetime(),
 })
 
+const vendorSummarySchema = vendorResponseSchema.extend({
+  totalExpenses: z.number(),
+  totalBilled: z.number(),
+  totalPaid: z.number(),
+  totalOutstanding: z.number(),
+  remainingBalance: z.number(),
+  expenseCount: z.number(),
+  billCount: z.number(),
+})
+
+const vendorBillSchema = z.object({
+  id: z.string(),
+  siteId: z.string(),
+  amount: z.number(),
+  amountPaid: z.number(),
+  remaining: z.number(),
+  paymentDate: z.string().datetime().nullable(),
+  paymentStatus: paymentStatusSchema,
+  description: z.string().nullable(),
+  reason: z.string().nullable(),
+  siteName: z.string(),
+  createdAt: z.string().datetime(),
+  billDate: z.string().datetime(),
+})
+
+const vendorPaymentSchema = z.object({
+  id: z.string(),
+  expenseId: z.string(),
+  expenseAmount: z.number(),
+  amount: z.number(),
+  note: z.string().nullable(),
+  siteId: z.string(),
+  siteName: z.string(),
+  description: z.string().nullable(),
+  reason: z.string().nullable(),
+  createdAt: z.string().datetime(),
+  paymentDate: z.string().datetime(),
+})
+
+const vendorStatementEntrySchema = z.object({
+  id: z.string(),
+  entryType: z.enum(['BILL', 'PAYMENT']),
+  referenceId: z.string(),
+  expenseId: z.string(),
+  date: z.string().datetime(),
+  billAmount: z.number(),
+  paymentAmount: z.number(),
+  balance: z.number(),
+  description: z.string().nullable(),
+  reason: z.string().nullable(),
+  note: z.string().nullable(),
+  siteId: z.string(),
+  siteName: z.string(),
+})
+
 const errorResponseSchema = z.object({
   ok: z.literal(false),
   error: z.string(),
 })
+
+async function getVendorForUser(vendorId: string, userId: string) {
+  const company = await getCompanyForUser(userId)
+  if (!company) return { company: null, vendor: null }
+
+  const vendor = await prisma.vendor.findFirst({
+    where: { id: vendorId, companyId: company.id, isDeleted: false },
+  })
+
+  return { company, vendor }
+}
+
+function mapVendorBase(vendor: {
+  id: string
+  name: string
+  type: string
+  phone: string | null
+  email: string | null
+  createdAt: Date
+}) {
+  return {
+    id: vendor.id,
+    name: vendor.name,
+    type: vendor.type,
+    phone: vendor.phone,
+    email: vendor.email,
+    createdAt: vendor.createdAt.toISOString(),
+  }
+}
 
 // ── GET /vendors ─────────────────────────────────────
 
@@ -100,14 +192,7 @@ vendorRoutes.openapi(getVendorsRoute, async (c) => {
   })
 
   const responseData = {
-    vendors: vendors.map((v) => ({
-      id: v.id,
-      name: v.name,
-      type: v.type,
-      phone: v.phone,
-      email: v.email,
-      createdAt: v.createdAt,
-    })),
+    vendors: vendors.map(mapVendorBase),
   }
   await cacheService.set(cacheKey, responseData, CacheTTL.ENTITY_LIST)
   return jsonOk(c, responseData) as any
@@ -172,14 +257,7 @@ vendorRoutes.openapi(createVendorRoute, async (c) => {
   await invalidateVendorCaches(company.id)
 
   return jsonOk(c, {
-    vendor: {
-      id: vendor.id,
-      name: vendor.name,
-      type: vendor.type,
-      phone: vendor.phone,
-      email: vendor.email,
-      createdAt: vendor.createdAt,
-    },
+    vendor: mapVendorBase(vendor),
   }, 201) as any
 })
 
@@ -244,14 +322,7 @@ vendorRoutes.openapi(updateVendorRoute, async (c) => {
   await invalidateVendorCaches(company.id, id)
 
   return jsonOk(c, {
-    vendor: {
-      id: vendor.id,
-      name: vendor.name,
-      type: vendor.type,
-      phone: vendor.phone,
-      email: vendor.email,
-      createdAt: vendor.createdAt,
-    },
+    vendor: mapVendorBase(vendor),
   }) as any
 })
 
@@ -262,7 +333,7 @@ const deleteVendorRoute = createRoute({
   path: '/{id}',
   tags: ['Vendors'],
   summary: 'Delete a vendor',
-  description: 'Remove a vendor. Existing expense records linked to this vendor will retain their data but the vendor reference is set to null.',
+  description: 'Soft-delete a vendor. Existing expense records and ledger history remain available for reporting.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ id: z.string() }),
@@ -314,8 +385,8 @@ const getVendorRoute = createRoute({
   method: 'get',
   path: '/{id}',
   tags: ['Vendors'],
-  summary: 'Get vendor profile',
-  description: 'Returns vendor details with total expenses paid and expense count across all sites.',
+  summary: 'Get vendor summary',
+  description: 'Returns ledger-based vendor accounting totals using expenses as bills and expense payments as vendor payments.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ id: z.string() }),
@@ -327,17 +398,12 @@ const getVendorRoute = createRoute({
           schema: z.object({
             ok: z.literal(true),
             data: z.object({
-              vendor: vendorResponseSchema.extend({
-                totalExpenses: z.number(),
-                expenseCount: z.number(),
-                totalPaid: z.number(),
-                remainingBalance: z.number(),
-              }),
+              vendor: vendorSummarySchema,
             }),
           }),
         },
       },
-      description: 'Vendor profile',
+      description: 'Vendor summary',
     },
     404: {
       content: { 'application/json': { schema: errorResponseSchema } },
@@ -349,40 +415,27 @@ const getVendorRoute = createRoute({
 vendorRoutes.openapi(getVendorRoute, async (c) => {
   const auth = c.get('auth')
   const { id } = c.req.valid('param')
-
-  const company = await getCompanyForUser(auth.userId)
+  const { company, vendor } = await getVendorForUser(id, auth.userId)
   if (!company) return jsonError(c, 'No company found', 404) as any
-
-  const vendor = await prisma.vendor.findFirst({
-    where: { id, companyId: company.id, isDeleted: false },
-  })
   if (!vendor) return jsonError(c, 'Vendor not found', 404) as any
 
   const cacheKey = CacheKeys.vendorDetail(id)
   const cached = await cacheService.get<any>(cacheKey)
   if (cached) return jsonOk(c, cached) as any
 
-  const expenseAgg = await prisma.expense.aggregate({
-    where: { vendorId: vendor.id, isDeleted: false },
-    _sum: { amount: true, amountPaid: true },
-    _count: true,
-  })
-
-  const totalBilled = expenseAgg._sum.amount ?? 0
-  const totalPaid = expenseAgg._sum.amountPaid ?? 0
+  const expenses = await getVendorExpenseRecords(vendor.id)
+  const summary = summarizeVendorRecords(expenses)
 
   const responseData = {
     vendor: {
-      id: vendor.id,
-      name: vendor.name,
-      type: vendor.type,
-      phone: vendor.phone,
-      email: vendor.email,
-      createdAt: vendor.createdAt,
-      totalExpenses: totalBilled,
-      totalPaid: totalPaid,
-      remainingBalance: totalBilled - totalPaid,
-      expenseCount: expenseAgg._count,
+      ...mapVendorBase(vendor),
+      totalExpenses: summary.totalBilled,
+      totalBilled: summary.totalBilled,
+      totalPaid: summary.totalPaid,
+      totalOutstanding: summary.totalOutstanding,
+      remainingBalance: summary.totalOutstanding,
+      expenseCount: summary.billCount,
+      billCount: summary.billCount,
     },
   }
   await cacheService.set(cacheKey, responseData, CacheTTL.ENTITY_DETAIL)
@@ -395,8 +448,8 @@ const getVendorTransactionsRoute = createRoute({
   method: 'get',
   path: '/{id}/transactions',
   tags: ['Vendors'],
-  summary: 'List vendor transactions',
-  description: 'Returns all expense records linked to this vendor across all sites, ordered by most recent first.',
+  summary: 'List vendor bills',
+  description: 'Returns vendor bill documents backed by expenses, with paid totals and outstanding amounts derived from the ledger.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ id: z.string() }),
@@ -408,24 +461,16 @@ const getVendorTransactionsRoute = createRoute({
           schema: z.object({
             ok: z.literal(true),
             data: z.object({
-              transactions: z.array(z.object({
-                id: z.string(),
-                amount: z.number(),
-                amountPaid: z.number(),
-                paymentDate: z.string().datetime().nullable(),
-                paymentStatus: z.enum(['PENDING', 'PARTIAL', 'COMPLETED']),
-                description: z.string().nullable(),
-                reason: z.string().nullable(),
-                siteName: z.string().nullable(),
-                createdAt: z.string().datetime(),
-              })),
+              transactions: z.array(vendorBillSchema),
               totalBilled: z.number(),
               totalPaid: z.number(),
+              totalOutstanding: z.number(),
+              billCount: z.number(),
             }),
           }),
         },
       },
-      description: 'Vendor transaction history',
+      description: 'Vendor bills list',
     },
     404: {
       content: { 'application/json': { schema: errorResponseSchema } },
@@ -437,44 +482,133 @@ const getVendorTransactionsRoute = createRoute({
 vendorRoutes.openapi(getVendorTransactionsRoute, async (c) => {
   const auth = c.get('auth')
   const { id } = c.req.valid('param')
-
-  const company = await getCompanyForUser(auth.userId)
+  const { company, vendor } = await getVendorForUser(id, auth.userId)
   if (!company) return jsonError(c, 'No company found', 404) as any
-
-  const vendor = await prisma.vendor.findFirst({
-    where: { id, companyId: company.id, isDeleted: false },
-  })
   if (!vendor) return jsonError(c, 'Vendor not found', 404) as any
 
   const cacheKey = CacheKeys.vendorTransactions(id)
   const cached = await cacheService.get<any>(cacheKey)
   if (cached) return jsonOk(c, cached) as any
 
-  const expenses = await prisma.expense.findMany({
-    where: { vendorId: vendor.id, isDeleted: false },
-    include: { site: { select: { name: true } } },
-    orderBy: { createdAt: 'desc' },
-  })
-
-  const totalBilled = expenses.reduce((sum, e) => sum + e.amount, 0)
-  const totalPaid = expenses.reduce((sum, e) => sum + e.amountPaid, 0)
+  const expenses = await getVendorExpenseRecords(vendor.id)
+  const summary = summarizeVendorRecords(expenses)
 
   const responseData = {
-    transactions: expenses.map((e) => ({
-      id: e.id,
-      siteId: e.siteId,
-      amount: e.amount,
-      amountPaid: e.amountPaid,
-      paymentDate: e.paymentDate?.toISOString() ?? null,
-      paymentStatus: e.paymentStatus,
-      description: e.description,
-      reason: e.reason,
-      siteName: e.site.name,
-      createdAt: e.createdAt.toISOString(),
-    })),
-    totalBilled,
-    totalPaid,
+    transactions: mapVendorBills(expenses),
+    totalBilled: summary.totalBilled,
+    totalPaid: summary.totalPaid,
+    totalOutstanding: summary.totalOutstanding,
+    billCount: summary.billCount,
   }
+  await cacheService.set(cacheKey, responseData, CacheTTL.ENTITY_LIST)
+  return jsonOk(c, responseData) as any
+})
+
+const getVendorPaymentsRoute = createRoute({
+  method: 'get',
+  path: '/{id}/payments',
+  tags: ['Vendors'],
+  summary: 'List vendor payments',
+  description: 'Returns all payment ledger rows posted against this vendor\'s expenses.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: {
+      content: {
+        'application/json': {
+          schema: z.object({
+            ok: z.literal(true),
+            data: z.object({
+              payments: z.array(vendorPaymentSchema),
+              totalPaid: z.number(),
+              paymentCount: z.number(),
+            }),
+          }),
+        },
+      },
+      description: 'Vendor payments list',
+    },
+    404: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: 'Vendor not found',
+    },
+  },
+})
+
+vendorRoutes.openapi(getVendorPaymentsRoute, async (c) => {
+  const auth = c.get('auth')
+  const { id } = c.req.valid('param')
+  const { company, vendor } = await getVendorForUser(id, auth.userId)
+  if (!company) return jsonError(c, 'No company found', 404) as any
+  if (!vendor) return jsonError(c, 'Vendor not found', 404) as any
+
+  const cacheKey = CacheKeys.vendorPayments(id)
+  const cached = await cacheService.get<any>(cacheKey)
+  if (cached) return jsonOk(c, cached) as any
+
+  const expenses = await getVendorExpenseRecords(vendor.id)
+  const payments = mapVendorPayments(expenses)
+
+  const responseData = {
+    payments,
+    totalPaid: payments.reduce((sum, payment) => sum + payment.amount, 0),
+    paymentCount: payments.length,
+  }
+
+  await cacheService.set(cacheKey, responseData, CacheTTL.ENTITY_LIST)
+  return jsonOk(c, responseData) as any
+})
+
+const getVendorStatementRoute = createRoute({
+  method: 'get',
+  path: '/{id}/statement',
+  tags: ['Vendors'],
+  summary: 'Get vendor statement',
+  description: 'Returns a chronological vendor ledger combining bill documents and expense payment rows with a running outstanding balance.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: {
+      content: {
+        'application/json': {
+          schema: z.object({
+            ok: z.literal(true),
+            data: z.object({
+              statement: z.array(vendorStatementEntrySchema),
+              totalBilled: z.number(),
+              totalPaid: z.number(),
+              closingBalance: z.number(),
+            }),
+          }),
+        },
+      },
+      description: 'Vendor statement',
+    },
+    404: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: 'Vendor not found',
+    },
+  },
+})
+
+vendorRoutes.openapi(getVendorStatementRoute, async (c) => {
+  const auth = c.get('auth')
+  const { id } = c.req.valid('param')
+  const { company, vendor } = await getVendorForUser(id, auth.userId)
+  if (!company) return jsonError(c, 'No company found', 404) as any
+  if (!vendor) return jsonError(c, 'Vendor not found', 404) as any
+
+  const cacheKey = CacheKeys.vendorStatement(id)
+  const cached = await cacheService.get<any>(cacheKey)
+  if (cached) return jsonOk(c, cached) as any
+
+  const expenses = await getVendorExpenseRecords(vendor.id)
+  const responseData = buildVendorStatement(expenses)
+
   await cacheService.set(cacheKey, responseData, CacheTTL.ENTITY_LIST)
   return jsonOk(c, responseData) as any
 })
