@@ -1,7 +1,13 @@
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi'
 import type { AuthContext } from '../types/auth.js'
 import { prisma } from '../db/prisma.js'
-import { hashPassword, signToken, verifyPassword } from '../services/auth.service.js'
+import {
+  hashPassword,
+  signAccessToken,
+  signRefreshToken,
+  verifyPassword,
+  verifyRefreshToken,
+} from '../services/auth.service.js'
 import { requireJwt } from '../middlewares/jwt.js'
 import { jsonError, jsonOk } from '../utils/response.js'
 import { randomBytes } from 'crypto'
@@ -108,12 +114,19 @@ authRoutes.openapi(signUpRoute, async (c) => {
       },
     })
 
-    const token = signToken({ sub: user.id, email: user.email })
+    const accessToken = signAccessToken({ sub: user.id, email: user.email })
+    const refreshToken = signRefreshToken({ sub: user.id })
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { refreshToken },
+    })
 
     return jsonOk(
       c,
       {
-        token,
+        accessToken,
+        refreshToken,
         user: {
           id: user.id,
           email: user.email,
@@ -148,7 +161,7 @@ const signInRoute = createRoute({
   path: '/signin',
   tags: ['Auth'],
   summary: 'Sign in',
-  description: 'Authenticate with email and password. Returns a JWT token valid for 7 days.',
+  description: 'Authenticate with email and password. Returns access and refresh tokens.',
   request: {
     body: {
       content: {
@@ -165,12 +178,13 @@ const signInRoute = createRoute({
           schema: z.object({
             ok: z.literal(true),
             data: z.object({
-              token: z.string(),
+              accessToken: z.string(),
+              refreshToken: z.string(),
             }),
           }),
         },
       },
-      description: 'Authentication successful, JWT token returned',
+      description: 'Authentication successful, JWT tokens returned',
     },
     401: {
       content: {
@@ -204,8 +218,101 @@ authRoutes.openapi(signInRoute, async (c) => {
     return jsonError(c, 'Invalid credentials', 401) as any
   }
 
-  const token = signToken({ sub: user.id, email: user.email })
-  return jsonOk(c, { token }) as any
+  const accessToken = signAccessToken({ sub: user.id, email: user.email })
+  const refreshToken = signRefreshToken({ sub: user.id })
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { refreshToken },
+  })
+
+  return jsonOk(c, {
+    accessToken,
+    refreshToken,
+    user: {
+      id: user.id,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      createdAt: user.createdAt,
+    },
+  }) as any
+})
+
+
+const refreshRoute = createRoute({
+  method: 'post',
+  path: '/refresh',
+  tags: ['Auth'],
+  summary: 'Refresh access token',
+  description: 'Exchange a valid refresh token for a new access token.',
+  request: {
+    body: {
+      content: {
+        'application/json': {
+          schema: z.object({
+            refreshToken: z.string(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      content: {
+        'application/json': {
+          schema: z.object({
+            ok: z.literal(true),
+            data: z.object({
+              accessToken: z.string(),
+              refreshToken: z.string(),
+            }),
+          }),
+        },
+      },
+      description: 'Token refreshed successfully',
+    },
+    401: {
+      content: {
+        'application/json': {
+          schema: errorResponseSchema,
+        },
+      },
+      description: 'Invalid or expired refresh token',
+    },
+  },
+})
+
+authRoutes.openapi(refreshRoute, async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const parsed = z.object({ refreshToken: z.string() }).safeParse(body)
+
+  if (!parsed.success) {
+    return jsonError(c, 'Refresh token required', 400) as any
+  }
+
+  try {
+    const payload = verifyRefreshToken(parsed.data.refreshToken) as { sub: string }
+    const user = await prisma.user.findUnique({
+      where: { id: payload.sub },
+    })
+
+    if (!user || user.refreshToken !== parsed.data.refreshToken) {
+      return jsonError(c, 'Invalid refresh token', 401) as any
+    }
+
+    const accessToken = signAccessToken({ sub: user.id, email: user.email })
+    const newRefreshToken = signRefreshToken({ sub: user.id })
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { refreshToken: newRefreshToken },
+    })
+
+    return jsonOk(c, { accessToken, refreshToken: newRefreshToken }) as any
+  } catch {
+    return jsonError(c, 'Invalid or expired refresh token', 401) as any
+  }
 })
 
 const meRoute = createRoute({
@@ -258,7 +365,46 @@ authRoutes.openapi(meRoute, async (c) => {
   }) as any
 })
 
+const logoutRoute = createRoute({
+  method: 'post',
+  path: '/logout',
+  tags: ['Auth'],
+  summary: 'Logout user',
+  description: 'Clears the refresh token from the database for the authenticated user.',
+  security: [{ bearerAuth: [] }],
+  responses: {
+    200: {
+      content: {
+        'application/json': {
+          schema: z.object({
+            ok: z.literal(true),
+            data: z.object({ message: z.string() }),
+          }),
+        },
+      },
+      description: 'Logout successful',
+    },
+    401: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: 'Invalid or missing token',
+    },
+  },
+})
+
+authRoutes.openapi(logoutRoute, async (c) => {
+  return requireJwt(c, async () => {
+    const auth = c.get('auth')
+    await prisma.user.update({
+      where: { id: auth.userId },
+      data: { refreshToken: null },
+    })
+
+    return jsonOk(c, { message: 'Logged out successfully' }) as any
+  }) as any
+})
+
 // ── POST /auth/forgot-password ────────────────────────
+
 
 const forgotPasswordRoute = createRoute({
   method: 'post',
