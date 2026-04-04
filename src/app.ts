@@ -38,14 +38,27 @@ const pinoLogger = createMiddleware(async (c, next) => {
 
 export const app = new OpenAPIHono()
 
-app.use('*', requestId)
-app.use('*', pinoLogger)
 app.use('*', cors({
-  origin: ['http://localhost:3000', 'http://localhost:5173', 'https://www.sitesledger.app', 'https://www.siteledger.app'],
+  origin: (origin) => {
+    const allowed = [
+      'http://localhost:3000',
+      'http://localhost:5173',
+      'https://www.sitesledger.app',
+      'https://sitesledger.app',
+      'https://www.siteledger.app',
+      'https://siteledger.app',
+    ]
+    return allowed.includes(origin) ? origin : null
+  },
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization'],
+  allowHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With'],
+  exposeHeaders: ['Content-Length', 'X-Request-ID'],
+  maxAge: 600,
   credentials: true,
 }))
+
+app.use('*', requestId)
+app.use('*', pinoLogger)
 
 app.doc('/openapi.json', {
   openapi: '3.0.0',
