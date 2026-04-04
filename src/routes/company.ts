@@ -869,6 +869,7 @@ companyRoutes.openapi(getActivityRoute, async (c) => {
         },
         { investorTransactionId: { not: null } },
         { expenseId: { not: null } },
+        { partnerId: { not: null } },
       ],
     },
     orderBy: { postedAt: 'desc' },
@@ -876,6 +877,7 @@ companyRoutes.openapi(getActivityRoute, async (c) => {
     include: {
       site: { select: { name: true } },
       companyWithdrawal: { select: { note: true } },
+      partner: { select: { name: true } },
       investorTransaction: {
         select: {
           note: true,
@@ -931,7 +933,7 @@ companyRoutes.openapi(getActivityRoute, async (c) => {
       }
 
       if (payment.investorTransactionId) {
-        const investorName = payment.investorTransaction?.investor.name ?? 'Investor'
+        const investorName = payment.investorTransaction?.investor?.name ?? 'Investor'
 
         return {
           id: payment.id,
@@ -948,11 +950,21 @@ companyRoutes.openapi(getActivityRoute, async (c) => {
         }
       }
 
+      if (payment.partnerId) {
+        return {
+          id: payment.id,
+          type: 'investor_tx' as const, // Using investor_tx or could use a new type
+          amount: Number(payment.amount),
+          description: `Capital from ${payment.partner?.name ?? 'Partner'}`,
+          date: payment.postedAt.toISOString(),
+        }
+      }
+
       return {
         id: payment.id,
         type: 'expense' as const,
         amount: -Number(payment.amount),
-        description: `${payment.expense?.description ?? 'Expense'} - ${payment.expense?.site.name ?? 'site'}`,
+        description: `${payment.expense?.description ?? 'Expense'} - ${payment.expense?.site?.name ?? 'site'}`,
         date: payment.postedAt.toISOString(),
       }
     }),
