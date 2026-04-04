@@ -84,19 +84,17 @@ else
 fi
 
 # 6. Handle .env synchronization
-if [ ! -f "$PROJECT_DIR/.env" ]; then
-    if [ ! -z "$ENV_FILE_CONTENT" ] && [ "$ENV_FILE_CONTENT" != " " ]; then
-        echo "📄 Generating .env from GitHub Secrets..."
-        echo "$ENV_FILE_CONTENT" > "$PROJECT_DIR/.env"
-        # Ensure correct permissions
-        chmod 600 "$PROJECT_DIR/.env"
-        echo "✅ .env file created from CI/CD secrets."
-    else
-        echo "❌ ERROR: .env file missing and ENV_FILE_CONTENT secret is EMPTY in GitHub!"
-    fi
+# Ensure .env is always up-to-date with the secret from GitHub
+if [ ! -z "$ENV_FILE_CONTENT" ] && [ "$ENV_FILE_CONTENT" != " " ]; then
+    echo "📄 Updating .env from GitHub Secrets..."
+    echo "$ENV_FILE_CONTENT" > "$PROJECT_DIR/.env"
+    chmod 600 "$PROJECT_DIR/.env"
+    echo "✅ .env file successfully updated."
+elif [ ! -f "$PROJECT_DIR/.env" ]; then
+    echo "❌ ERROR: .env file missing and ENV_FILE_CONTENT secret is EMPTY in GitHub!"
+    exit 1
 else
-    echo "✅ .env file already exists."
+    echo "✅ Using existing .env file (ENV_FILE_CONTENT not provided)."
 fi
 
 echo "✅ Full setup sequence complete!"
-

@@ -90,18 +90,6 @@ import { cors } from 'hono/cors'
 const env = loadEnv()
 const log = createLogger('server')
 
-// ── Middleware ──────────────────────────────────────
-
-// Set up CORS on the Hono app instance
-app.use('*', cors({
-  origin: ['http://localhost:5173', 'https://www.siteledger.app'], // Add your friend's domain here
-  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization'],
-  exposeHeaders: ['Content-Length'],
-  maxAge: 600,
-  credentials: true,
-}))
-
 // ── Startup ─────────────────────────────────────────
 
 async function start() {
