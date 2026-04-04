@@ -19,6 +19,13 @@ const envSchema = z.object({
     .transform((v) => v === 'true'),
   REDIS_CONNECT_TIMEOUT: z.coerce.number().int().positive().default(5000),
   REDIS_COMMAND_TIMEOUT: z.coerce.number().int().positive().default(3000),
+
+  // SMTP
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.coerce.number().int().positive().optional(),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+  SMTP_FROM: z.string().optional().default('noreply@site-ledger.com'),
 })
 
 export type Env = z.infer<typeof envSchema>
