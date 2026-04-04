@@ -177,7 +177,7 @@ companyRoutes.openapi(createCompanyRoute, async (c) => {
       id: company.id,
       name: company.name,
       address: company.address,
-      createdAt: company.createdAt,
+      createdAt: company.createdAt.toISOString(),
     },
   }, 201) as any
 })
@@ -268,7 +268,7 @@ companyRoutes.openapi(getCompanyRoute, async (c) => {
       id: companyWithPartners.id,
       name: companyWithPartners.name,
       address: companyWithPartners.address,
-      createdAt: companyWithPartners.createdAt,
+      createdAt: companyWithPartners.createdAt.toISOString(),
     },
     partner_fund: partnerFund,
     investor_fund: investorFund,
@@ -347,7 +347,7 @@ companyRoutes.openapi(updateCompanyRoute, async (c) => {
       id: company.id,
       name: company.name,
       address: company.address,
-      createdAt: company.createdAt,
+      createdAt: company.createdAt.toISOString(),
     },
   }) as any
 })
@@ -1058,7 +1058,7 @@ companyRoutes.openapi(getCompanyExpensesRoute, async (c) => {
       amount: e.amount,
       siteName: e.site.name,
       vendorName: e.vendor?.name ?? null,
-      createdAt: e.createdAt,
+      createdAt: e.createdAt.toISOString(),
     })),
     total,
     page,
