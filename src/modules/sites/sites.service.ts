@@ -64,15 +64,30 @@ export async function getSitesForUser(userId: string, showArchived?: 'true' | 'f
 
   const siteSummaries = await Promise.all(
     sites.map(async (site) => {
-      const [partnerAllocatedFund, investorAllocatedFund, totalExpenses, customerPayments, remainingFund] = await Promise.all([
+      const [
+        partnerAllocatedFund,
+        investorAllocatedFund,
+        totalExpenses,
+        totalExpensesBilled,
+        customerPayments,
+        remainingFund,
+        totalRevenueResult,
+      ] = await Promise.all([
         getSitePartnerAllocatedFund(site.id),
         getSiteEquityInvestorFund(site.id),
         getSiteTotalExpenses(site.id),
+        getSiteTotalExpensesBilled(site.id),
         getSiteCustomerPayments(site.id),
         getSiteRemainingFund(site.id),
+        prisma.customer.aggregate({
+          where: { siteId: site.id, isDeleted: false },
+          _sum: { sellingPrice: true },
+        }),
       ])
 
       const allocatedFund = partnerAllocatedFund + investorAllocatedFund
+      const totalRevenue = totalRevenueResult._sum.sellingPrice ?? 0
+      const totalProfit = totalRevenue - totalExpensesBilled
       const flatsSummary = { available: 0, booked: 0, sold: 0 }
       for (const floor of site.floors) {
         for (const flat of floor.flats) {
@@ -97,6 +112,7 @@ export async function getSitesForUser(userId: string, showArchived?: 'true' | 'f
         totalExpenses,
         customerPayments,
         remainingFund,
+        totalProfit,
         flatsSummary,
         createdAt: site.createdAt,
       }

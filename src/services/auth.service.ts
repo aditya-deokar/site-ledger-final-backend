@@ -14,11 +14,11 @@ export async function verifyPassword(password: string, hash: string) {
 }
 
 export function signAccessToken(payload: { sub: string; email: string }) {
-  return jwt.sign(payload, env.JWT_SECRET, { expiresIn: '30s' })
+  return jwt.sign(payload, env.JWT_SECRET, { expiresIn: '15d' })
 }
 
 export function signRefreshToken(payload: { sub: string }) {
-  return jwt.sign(payload, env.REFRESH_TOKEN_SECRET, { expiresIn: '7d' })
+  return jwt.sign(payload, env.REFRESH_TOKEN_SECRET, { expiresIn: '15m' })
 }
 
 export function verifyToken(token: string) {

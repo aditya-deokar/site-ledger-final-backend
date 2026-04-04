@@ -97,7 +97,7 @@ const getSitesRoute = createRoute({
   tags: ['Sites'],
   summary: 'List all sites',
   description:
-    'Returns sites for the company. By default returns only active sites. Pass `showArchived=true` to include archived sites, or `showArchived=only` to list only archived sites. Each site includes a fund breakdown: `partnerAllocatedFund`, `investorAllocatedFund`, `allocatedFund`, `totalExpenses`, `customerPayments`, `remainingFund`, and `isActive`.',
+    'Returns sites for the company. By default returns only active sites. Pass `showArchived=true` to include archived sites, or `showArchived=only` to list only archived sites. Each site includes a fund breakdown: `partnerAllocatedFund`, `investorAllocatedFund`, `allocatedFund`, `totalExpenses`, `customerPayments`, `remainingFund`, `totalProfit`, and `isActive`.',
   security: [{ bearerAuth: [] }],
   request: {
     query: z.object({
@@ -127,6 +127,7 @@ const getSitesRoute = createRoute({
                   totalExpenses: z.number(),
                   customerPayments: z.number(),
                   remainingFund: z.number(),
+                  totalProfit: z.number(),
                   createdAt: z.string().datetime(),
                 }),
               ),
