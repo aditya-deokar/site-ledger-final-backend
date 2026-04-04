@@ -101,6 +101,7 @@ export async function invalidateInvestorDetailCaches(investorId: string) {
 export async function invalidateWithdrawalCaches(companyId: string) {
   await Promise.all([
     cacheService.del(CacheKeys.companyWithdrawals(companyId)),
+    cacheService.del(CacheKeys.companyWithdrawalList(companyId)),
     cacheService.del(CacheKeys.companyAvailableFund(companyId)),
     cacheService.del(CacheKeys.companyDetails(companyId)),
     cacheService.delByPattern(`${CacheKeys.activityFeed(companyId)}:*`),
@@ -117,6 +118,8 @@ export async function invalidateVendorCaches(companyId: string, vendorId?: strin
     keys.push(
       cacheService.del(CacheKeys.vendorDetail(vendorId)),
       cacheService.del(CacheKeys.vendorTransactions(vendorId)),
+      cacheService.del(CacheKeys.vendorPayments(vendorId)),
+      cacheService.del(CacheKeys.vendorStatement(vendorId)),
     )
   }
   await Promise.all(keys)

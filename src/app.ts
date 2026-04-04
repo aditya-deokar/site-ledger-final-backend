@@ -10,6 +10,7 @@ import { siteRoutes } from './routes/sites.js'
 import { vendorRoutes } from './routes/vendors.js'
 import { customerRoutes } from './routes/customers.js'
 import { investorRoutes } from './routes/investors.js'
+import { LedgerError } from './services/ledger.service.js'
 import { jsonError } from './utils/response.js'
 import { requestId } from './middlewares/request-id.js'
 import { createLogger } from './config/logger.js'
@@ -94,5 +95,15 @@ app.route('/api/investors', investorRoutes)
 app.notFound((c: Context) => jsonError(c, 'Not Found', 404))
 
 app.onError((err: Error, c: Context) => {
+  if (err instanceof LedgerError) {
+    const status = err.code === 'IDEMPOTENCY_CONFLICT'
+      ? 409
+      : err.code === 'INSUFFICIENT_FUNDS' || err.code === 'AMOUNT_EXCEEDS_LIMIT' || err.code === 'INVALID_LEDGER_INPUT'
+        ? 400
+        : 500
+
+    return jsonError(c, err.code, status)
+  }
+
   return jsonError(c, err.message || 'Internal Server Error', 500)
 })

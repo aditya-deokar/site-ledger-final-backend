@@ -1,20 +1,34 @@
+import { Prisma } from '@prisma/client'
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi'
 import type { AuthContext } from '../types/auth.js'
 import { prisma } from '../db/prisma.js'
 import { requireJwt } from '../middlewares/jwt.js'
 import { jsonError, jsonOk } from '../utils/response.js'
 import { getCompanyForUser } from '../utils/company.js'
+import { createLedgerEntry } from '../services/ledger.service.js'
+import {
+  calculateInvestorLedgerTotals,
+  deriveInvestorTransactionPaymentStatus,
+  getInvestorLedgerSummary,
+  getInvestorTransactionPaidTotal,
+  getInvestorTransactionRemaining,
+  mapInvestorTransactionResponse,
+  syncInvestorClosedState,
+} from '../services/investor-ledger.service.js'
 import { invalidateInvestorCaches, invalidateInvestorDetailCaches } from '../services/cache-invalidation.js'
 import { cacheService } from '../services/cache.service.js'
 import { CacheKeys, CacheTTL } from '../config/cache-keys.js'
 
 export const investorRoutes = new OpenAPIHono<{ Variables: AuthContext['Variables'] }>()
+const LEDGER_TX_OPTIONS = { maxWait: 15000, timeout: 20000 } as const
 
 investorRoutes.use('*', requireJwt)
 
 // ── Schemas ──────────────────────────────────────────
 
 const investorTypeEnum = z.enum(['EQUITY', 'FIXED_RATE'])
+const investorTransactionKindEnum = z.enum(['PRINCIPAL_IN', 'PRINCIPAL_OUT', 'INTEREST'])
+const paymentStatusEnum = z.enum(['PENDING', 'PARTIAL', 'COMPLETED'])
 
 const createInvestorSchema = z.object({
   name: z.string().min(1),
@@ -37,6 +51,7 @@ const addTransactionSchema = z.object({
   note: z.string().optional(),
   amountPaid: z.number().min(0).optional().default(0),
   paymentDate: z.string().datetime().optional(),
+  idempotencyKey: z.string().optional(),
 })
 
 const investorResponseSchema = z.object({
@@ -50,17 +65,21 @@ const investorResponseSchema = z.object({
   fixedRate: z.number().nullable(),
   totalInvested: z.number(),
   totalReturned: z.number(),
+  interestPaid: z.number(),
+  outstandingPrincipal: z.number(),
   isClosed: z.boolean(),
   createdAt: z.string().datetime(),
 })
 
 const transactionResponseSchema = z.object({
   id: z.string(),
+  kind: investorTransactionKindEnum,
   amount: z.number(),
   note: z.string().nullable(),
   amountPaid: z.number(),
+  remaining: z.number(),
   paymentDate: z.string().datetime().nullable(),
-  paymentStatus: z.enum(['PENDING', 'PARTIAL', 'COMPLETED']),
+  paymentStatus: paymentStatusEnum,
   createdAt: z.string().datetime(),
 })
 
@@ -78,6 +97,166 @@ async function getInvestorForUser(investorId: string, userId: string) {
     where: { id: investorId, companyId: company.id, isDeleted: false },
   })
   return { company, investor }
+}
+
+const investorTransactionInclude = Prisma.validator<Prisma.InvestorTransactionInclude>()({
+  ledgerEntries: {
+    select: { amount: true, postedAt: true },
+    orderBy: { postedAt: 'desc' },
+  },
+})
+
+const investorWithLedgerInclude = Prisma.validator<Prisma.InvestorInclude>()({
+  site: { select: { id: true, name: true } },
+  transactions: {
+    where: { isDeleted: false },
+    include: investorTransactionInclude,
+    orderBy: { createdAt: 'desc' },
+  },
+})
+
+type InvestorTransactionWithLedger = Prisma.InvestorTransactionGetPayload<{
+  include: typeof investorTransactionInclude
+}>
+
+type InvestorWithLedger = Prisma.InvestorGetPayload<{
+  include: typeof investorWithLedgerInclude
+}>
+
+function mapInvestorResponse(investor: InvestorWithLedger) {
+  const totals = calculateInvestorLedgerTotals(investor.transactions)
+
+  return {
+    id: investor.id,
+    name: investor.name,
+    phone: investor.phone,
+    type: investor.type,
+    siteId: investor.siteId,
+    siteName: investor.site?.name ?? null,
+    equityPercentage: investor.equityPercentage,
+    fixedRate: investor.fixedRate,
+    totalInvested: totals.principalInTotal,
+    totalReturned: totals.totalReturned,
+    interestPaid: totals.interestTotal,
+    outstandingPrincipal: totals.outstandingPrincipal,
+    isClosed: investor.isClosed,
+    createdAt: investor.createdAt.toISOString(),
+  }
+}
+
+async function getInvestorView(
+  investorId: string,
+  tx: Prisma.TransactionClient | typeof prisma = prisma,
+) {
+  const investor = await tx.investor.findUnique({
+    where: { id: investorId },
+    include: investorWithLedgerInclude,
+  })
+
+  if (!investor) return null
+
+  return {
+    investor: mapInvestorResponse(investor),
+    transactions: investor.transactions.map((transaction: InvestorTransactionWithLedger) =>
+      mapInvestorTransactionResponse(transaction),
+    ),
+  }
+}
+
+async function getTransactionView(
+  transactionId: string,
+  tx: Prisma.TransactionClient | typeof prisma = prisma,
+) {
+  const transaction = await tx.investorTransaction.findUnique({
+    where: { id: transactionId },
+    include: investorTransactionInclude,
+  })
+
+  if (!transaction) return null
+
+  return mapInvestorTransactionResponse(transaction)
+}
+
+function resolveLedgerConfig(
+  investor: { siteId: string | null },
+  kind: 'PRINCIPAL_IN' | 'PRINCIPAL_OUT' | 'INTEREST',
+) {
+  const walletType = investor.siteId ? 'SITE' as const : 'COMPANY' as const
+
+  if (kind === 'PRINCIPAL_IN') {
+    return {
+      siteId: investor.siteId,
+      walletType,
+      direction: 'IN' as const,
+      movementType: 'INVESTOR_PRINCIPAL_IN' as const,
+    }
+  }
+
+  if (kind === 'PRINCIPAL_OUT') {
+    return {
+      siteId: investor.siteId,
+      walletType,
+      direction: 'OUT' as const,
+      movementType: 'INVESTOR_PRINCIPAL_OUT' as const,
+    }
+  }
+
+  return {
+    siteId: investor.siteId,
+    walletType,
+    direction: 'OUT' as const,
+    movementType: 'INVESTOR_INTEREST' as const,
+  }
+}
+
+function getDefaultLedgerNote(kind: 'PRINCIPAL_IN' | 'PRINCIPAL_OUT' | 'INTEREST') {
+  if (kind === 'PRINCIPAL_IN') return 'Investor principal received'
+  if (kind === 'PRINCIPAL_OUT') return 'Investor principal payout'
+  return 'Investor interest payout'
+}
+
+async function createInvestorTransactionDocumentWithLedger(
+  tx: Prisma.TransactionClient,
+  input: {
+    companyId: string
+    investor: { id: string; siteId: string | null }
+    kind: 'PRINCIPAL_IN' | 'PRINCIPAL_OUT' | 'INTEREST'
+    amount: number
+    amountPaid: number
+    note?: string
+    paymentDate?: string
+    idempotencyKey?: string
+  },
+) {
+  const transaction = await tx.investorTransaction.create({
+    data: {
+      investorId: input.investor.id,
+      kind: input.kind,
+      amount: input.amount,
+      note: input.note ?? null,
+    },
+  })
+
+  if (input.amountPaid > 0) {
+    const ledgerConfig = resolveLedgerConfig(input.investor, input.kind)
+
+    await createLedgerEntry({
+      companyId: input.companyId,
+      siteId: ledgerConfig.siteId,
+      walletType: ledgerConfig.walletType,
+      direction: ledgerConfig.direction,
+      movementType: ledgerConfig.movementType,
+      amount: new Prisma.Decimal(input.amountPaid),
+      idempotencyKey: input.idempotencyKey ?? `investor-${input.kind.toLowerCase()}:${transaction.id}:${Date.now()}`,
+      postedAt: input.paymentDate ? new Date(input.paymentDate) : undefined,
+      note: input.note ?? getDefaultLedgerNote(input.kind),
+      investorTransactionId: transaction.id,
+    }, tx)
+  }
+
+  await syncInvestorClosedState(input.investor.id, tx)
+
+  return transaction.id
 }
 
 // ══════════════════════════════════════════════════════
@@ -132,25 +311,12 @@ investorRoutes.openapi(getInvestorsRoute, async (c) => {
       isDeleted: false,
       ...(type ? { type } : {}),
     },
-    include: { site: { select: { id: true, name: true } } },
+    include: investorWithLedgerInclude,
     orderBy: { createdAt: 'desc' },
   })
 
   const responseData = {
-    investors: investors.map((inv) => ({
-      id: inv.id,
-      name: inv.name,
-      phone: inv.phone,
-      type: inv.type,
-      siteId: inv.siteId,
-      siteName: inv.site?.name ?? null,
-      equityPercentage: inv.equityPercentage,
-      fixedRate: inv.fixedRate,
-      totalInvested: inv.totalInvested,
-      totalReturned: inv.totalReturned,
-      isClosed: inv.isClosed,
-      createdAt: inv.createdAt,
-    })),
+    investors: investors.map((investor) => mapInvestorResponse(investor)),
   }
   await cacheService.set(cacheKey, responseData, CacheTTL.ENTITY_LIST)
   return jsonOk(c, responseData) as any
@@ -222,27 +388,15 @@ investorRoutes.openapi(createInvestorRoute, async (c) => {
       equityPercentage: type === 'EQUITY' ? equityPercentage : null,
       fixedRate: type === 'FIXED_RATE' ? fixedRate : null,
     },
-    include: { site: { select: { id: true, name: true } } },
   })
 
   await invalidateInvestorCaches(company.id, investor.siteId)
   await invalidateInvestorDetailCaches(investor.id)
 
+  const view = await getInvestorView(investor.id)
+
   return jsonOk(c, {
-    investor: {
-      id: investor.id,
-      name: investor.name,
-      phone: investor.phone,
-      type: investor.type,
-      siteId: investor.siteId,
-      siteName: investor.site?.name ?? null,
-      equityPercentage: investor.equityPercentage,
-      fixedRate: investor.fixedRate,
-      totalInvested: investor.totalInvested,
-      totalReturned: investor.totalReturned,
-      isClosed: investor.isClosed,
-      createdAt: investor.createdAt,
-    },
+    investor: view!.investor,
   }, 201) as any
 })
 
@@ -290,41 +444,12 @@ investorRoutes.openapi(getInvestorRoute, async (c) => {
   const cached = await cacheService.get<any>(cacheKey)
   if (cached) return jsonOk(c, cached) as any
 
-  const [fullInvestor, transactions] = await Promise.all([
-    prisma.investor.findUnique({
-      where: { id },
-      include: { site: { select: { id: true, name: true } } },
-    }),
-    prisma.investorTransaction.findMany({
-      where: { investorId: id, isDeleted: false },
-      orderBy: { createdAt: 'desc' },
-    }),
-  ])
+  const view = await getInvestorView(id)
+  if (!view) return jsonError(c, 'Investor not found', 404) as any
 
   const responseData = {
-    investor: {
-      id: fullInvestor!.id,
-      name: fullInvestor!.name,
-      phone: fullInvestor!.phone,
-      type: fullInvestor!.type,
-      siteId: fullInvestor!.siteId,
-      siteName: fullInvestor!.site?.name ?? null,
-      equityPercentage: fullInvestor!.equityPercentage,
-      fixedRate: fullInvestor!.fixedRate,
-      totalInvested: fullInvestor!.totalInvested,
-      totalReturned: fullInvestor!.totalReturned,
-      isClosed: fullInvestor!.isClosed,
-      createdAt: fullInvestor!.createdAt,
-    },
-    transactions: transactions.map((t) => ({
-      id: t.id,
-      amount: t.amount,
-      note: t.note,
-      amountPaid: t.amountPaid,
-      paymentDate: t.paymentDate ? t.paymentDate.toISOString() : null,
-      paymentStatus: t.paymentStatus,
-      createdAt: t.createdAt.toISOString(),
-    })),
+    investor: view.investor,
+    transactions: view.transactions,
   }
   await cacheService.set(cacheKey, responseData, CacheTTL.ENTITY_DETAIL)
   return jsonOk(c, responseData) as any
@@ -379,27 +504,15 @@ investorRoutes.openapi(updateInvestorRoute, async (c) => {
   const updated = await prisma.investor.update({
     where: { id },
     data: parsed.data,
-    include: { site: { select: { id: true, name: true } } },
   })
 
   await invalidateInvestorCaches(company.id, updated.siteId)
   await invalidateInvestorDetailCaches(updated.id)
 
+  const view = await getInvestorView(updated.id)
+
   return jsonOk(c, {
-    investor: {
-      id: updated.id,
-      name: updated.name,
-      phone: updated.phone,
-      type: updated.type,
-      siteId: updated.siteId,
-      siteName: updated.site?.name ?? null,
-      equityPercentage: updated.equityPercentage,
-      fixedRate: updated.fixedRate,
-      totalInvested: updated.totalInvested,
-      totalReturned: updated.totalReturned,
-      isClosed: updated.isClosed,
-      createdAt: updated.createdAt,
-    },
+    investor: view!.investor,
   }) as any
 })
 
@@ -460,10 +573,7 @@ const addTransactionRoute = createRoute({
   path: '/{id}/transactions',
   tags: ['Investors'],
   summary: 'Add investment amount',
-  description: `Record a new investment transaction for an investor.
-- **EQUITY investor**: amount is added to the site's allocated fund and remaining fund.
-- **FIXED_RATE investor**: amount is added to the company's available fund.
-Investor total_invested is updated atomically.`,
+  description: 'Create a principal-in transaction for an investor. If an initial paid amount is provided, a ledger entry is posted immediately.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ id: z.string() }),
@@ -477,12 +587,7 @@ Investor total_invested is updated atomically.`,
             ok: z.literal(true),
             data: z.object({
               transaction: transactionResponseSchema,
-              investor: z.object({
-                id: z.string(),
-                name: z.string(),
-                type: z.string(),
-                totalInvested: z.number(),
-              }),
+              investor: investorResponseSchema,
             }),
           }),
         },
@@ -510,43 +615,36 @@ investorRoutes.openapi(addTransactionRoute, async (c) => {
   const { company, investor } = await getInvestorForUser(id, auth.userId)
   if (!company || !investor) return jsonError(c, 'Investor not found', 404) as any
 
-  const { amount, note, amountPaid = 0, paymentDate } = parsed.data
+  const { amount, note, amountPaid = 0, paymentDate, idempotencyKey } = parsed.data
 
-  // Transaction: create investment record + update total_invested atomically
-  const result = await prisma.$transaction(async (tx) => {
-    const transaction = await tx.investorTransaction.create({
-      data: { investorId: investor.id, amount, note, amountPaid, paymentDate: paymentDate ? new Date(paymentDate) : null, paymentStatus: amountPaid >= amount ? 'COMPLETED' : amountPaid > 0 ? 'PARTIAL' : 'PENDING' },
+  if (amountPaid > amount) {
+    return jsonError(c, 'AMOUNT_EXCEEDS_LIMIT', 400) as any
+  }
+
+  const transactionId = await prisma.$transaction(async (tx) => {
+    return createInvestorTransactionDocumentWithLedger(tx, {
+      companyId: company.id,
+      investor,
+      kind: 'PRINCIPAL_IN',
+      amount,
+      amountPaid,
+      note,
+      paymentDate,
+      idempotencyKey,
     })
-
-    const updatedInvestor = await tx.investor.update({
-      where: { id: investor.id },
-      data: { totalInvested: { increment: amount } },
-    })
-
-    return { transaction, updatedInvestor }
-  })
+  }, LEDGER_TX_OPTIONS)
 
   await invalidateInvestorCaches(company.id, investor.siteId)
   await invalidateInvestorDetailCaches(investor.id)
 
+  const [view, transaction] = await Promise.all([
+    getInvestorView(investor.id),
+    getTransactionView(transactionId),
+  ])
+
   return jsonOk(c, {
-    transaction: {
-      id: result.transaction.id,
-      amount: result.transaction.amount,
-      note: result.transaction.note,
-      amountPaid: result.transaction.amountPaid,
-      paymentDate: result.transaction.paymentDate ? result.transaction.paymentDate.toISOString() : null,
-      paymentStatus: result.transaction.paymentStatus,
-      createdAt: result.transaction.createdAt.toISOString(),
-    },
-    investor: {
-      id: result.updatedInvestor.id,
-      name: result.updatedInvestor.name,
-      type: result.updatedInvestor.type,
-      totalInvested: result.updatedInvestor.totalInvested,
-      totalReturned: result.updatedInvestor.totalReturned,
-      isClosed: result.updatedInvestor.isClosed,
-    },
+    transaction: transaction!,
+    investor: view!.investor,
   }, 201) as any
 })
 
@@ -574,12 +672,7 @@ A negative transaction record is created for audit history.`,
             ok: z.literal(true),
             data: z.object({
               transaction: transactionResponseSchema,
-              investor: z.object({
-                id: z.string(),
-                name: z.string(),
-                type: z.string(),
-                totalInvested: z.number(),
-              }),
+              investor: investorResponseSchema,
             }),
           }),
         },
@@ -607,89 +700,41 @@ investorRoutes.openapi(returnInvestmentRoute, async (c) => {
   const { company, investor } = await getInvestorForUser(id, auth.userId)
   if (!investor || !company) return jsonError(c, 'Investor not found', 404) as any
 
-  if (investor.isClosed) {
-    return jsonError(c, 'This investor account is already closed. No further returns allowed.', 400) as any
+  const { amount, note, amountPaid = 0, paymentDate, idempotencyKey } = parsed.data
+
+  if (amountPaid > amount) {
+    return jsonError(c, 'AMOUNT_EXCEEDS_LIMIT', 400) as any
   }
 
-  const { amount, note, amountPaid = 0, paymentDate } = parsed.data
-
-  if (investor.type === 'EQUITY') {
-    // For equity investors: max return = equityPercentage% of (Revenue - Expenses)
-    if (!investor.siteId) return jsonError(c, 'Equity investor has no linked site', 400) as any
-
-    const { getSiteTotalExpensesBilled } = await import('../utils/fund.js')
-    const [totalRevenueResult, totalExpensesBilled] = await Promise.all([
-      prisma.customer.aggregate({
-        where: { siteId: investor.siteId, isDeleted: false },
-        _sum: { sellingPrice: true },
-      }),
-      getSiteTotalExpensesBilled(investor.siteId)
-    ])
-    
-    const totalRevenue = totalRevenueResult._sum.sellingPrice ?? 0
-    const totalProfit = Math.max(0, totalRevenue - totalExpensesBilled)
-    const equityReturn = Math.round((investor.equityPercentage ?? 0) / 100 * totalProfit)
-
-    if (amount > equityReturn) {
-      return jsonError(c, `Return amount (${amount}) exceeds equity return (${equityReturn}). ${investor.equityPercentage}% of total profit ${totalProfit} (Rev: ${totalRevenue}, Exp: ${totalExpensesBilled}).`, 400) as any
-    }
+  const summary = await getInvestorLedgerSummary(investor.id)
+  if (amount > summary.outstandingPrincipal) {
+    return jsonError(c, `Return amount (${amount}) exceeds outstanding principal (${summary.outstandingPrincipal})`, 400) as any
   }
 
-  if (investor.type === 'FIXED_RATE') {
-    // Return = giving back principal. Amount must not exceed remaining principal.
-    if (amount > investor.totalInvested) {
-      return jsonError(c, `Return amount (${amount}) exceeds remaining principal (${investor.totalInvested})`, 400) as any
-    }
-    // Check company available fund
-    const { getCompanyAvailableFund } = await import('../utils/fund.js')
-    const availableFund = await getCompanyAvailableFund(company.id)
-    if (amount > availableFund) {
-      return jsonError(c, `Return amount (${amount}) exceeds company available fund (${availableFund}). Funds may already be deployed to sites.`, 400) as any
-    }
-  }
-
-  const result = await prisma.$transaction(async (tx) => {
-    const transaction = await tx.investorTransaction.create({
-      data: { investorId: investor.id, amount: -amount, note: note ?? 'Principal return', amountPaid, paymentDate: paymentDate ? new Date(paymentDate) : null, paymentStatus: amountPaid >= amount ? 'COMPLETED' : amountPaid > 0 ? 'PARTIAL' : 'PENDING' },
+  const transactionId = await prisma.$transaction(async (tx) => {
+    return createInvestorTransactionDocumentWithLedger(tx, {
+      companyId: company.id,
+      investor,
+      kind: 'PRINCIPAL_OUT',
+      amount,
+      amountPaid,
+      note: note ?? 'Principal return',
+      paymentDate,
+      idempotencyKey,
     })
-    // For FIXED_RATE: decrement totalInvested (principal going back) + increment totalReturned
-    // For EQUITY: only increment totalReturned (profit payout, principal stays)
-    const shouldClose = investor.type === 'FIXED_RATE'
-      ? (investor.totalInvested - amount) <= 0
-      : true // equity always closes on return
-
-    const updateData = investor.type === 'FIXED_RATE'
-      ? { totalInvested: { decrement: amount }, totalReturned: { increment: amount }, ...(shouldClose ? { isClosed: true } : {}) }
-      : { totalReturned: { increment: amount }, isClosed: true }
-
-    const updatedInvestor = await tx.investor.update({
-      where: { id: investor.id },
-      data: updateData,
-    })
-    return { transaction, updatedInvestor }
-  })
+  }, LEDGER_TX_OPTIONS)
 
   await invalidateInvestorCaches(company.id, investor.siteId)
   await invalidateInvestorDetailCaches(investor.id)
 
+  const [view, transaction] = await Promise.all([
+    getInvestorView(investor.id),
+    getTransactionView(transactionId),
+  ])
+
   return jsonOk(c, {
-    transaction: {
-      id: result.transaction.id,
-      amount: result.transaction.amount,
-      note: result.transaction.note,
-      amountPaid: result.transaction.amountPaid,
-      paymentDate: result.transaction.paymentDate ? result.transaction.paymentDate.toISOString() : null,
-      paymentStatus: result.transaction.paymentStatus,
-      createdAt: result.transaction.createdAt.toISOString(),
-    },
-    investor: {
-      id: result.updatedInvestor.id,
-      name: result.updatedInvestor.name,
-      type: result.updatedInvestor.type,
-      totalInvested: result.updatedInvestor.totalInvested,
-      totalReturned: result.updatedInvestor.totalReturned,
-      isClosed: result.updatedInvestor.isClosed,
-    },
+    transaction: transaction!,
+    investor: view!.investor,
   }) as any
 })
 
@@ -714,13 +759,7 @@ const payInterestRoute = createRoute({
             ok: z.literal(true),
             data: z.object({
               transaction: transactionResponseSchema,
-              investor: z.object({
-                id: z.string(),
-                name: z.string(),
-                type: z.string(),
-                totalInvested: z.number(),
-                totalReturned: z.number(),
-              }),
+              investor: investorResponseSchema,
             }),
           }),
         },
@@ -752,48 +791,36 @@ investorRoutes.openapi(payInterestRoute, async (c) => {
     return jsonError(c, 'Interest payments are only for fixed-rate investors', 400) as any
   }
 
-  const { amount, note, amountPaid = 0, paymentDate } = parsed.data
+  const { amount, note, amountPaid = 0, paymentDate, idempotencyKey } = parsed.data
 
-  // Check company available fund
-  const { getCompanyAvailableFund } = await import('../utils/fund.js')
-  const availableFund = await getCompanyAvailableFund(company.id)
-  if (amount > availableFund) {
-    return jsonError(c, `Interest amount (${amount}) exceeds company available fund (${availableFund})`, 400) as any
+  if (amountPaid > amount) {
+    return jsonError(c, 'AMOUNT_EXCEEDS_LIMIT', 400) as any
   }
 
-  const result = await prisma.$transaction(async (tx) => {
-    const transaction = await tx.investorTransaction.create({
-      data: { investorId: investor.id, amount: -amount, note: note ?? 'Interest payment', amountPaid, paymentDate: paymentDate ? new Date(paymentDate) : null, paymentStatus: amountPaid >= amount ? 'COMPLETED' : amountPaid > 0 ? 'PARTIAL' : 'PENDING' },
+  const transactionId = await prisma.$transaction(async (tx) => {
+    return createInvestorTransactionDocumentWithLedger(tx, {
+      companyId: company.id,
+      investor,
+      kind: 'INTEREST',
+      amount,
+      amountPaid,
+      note: note ?? 'Interest payment',
+      paymentDate,
+      idempotencyKey,
     })
-    // Interest: only increment totalReturned, principal (totalInvested) stays the same
-    const updatedInvestor = await tx.investor.update({
-      where: { id: investor.id },
-      data: { totalReturned: { increment: amount } },
-    })
-    return { transaction, updatedInvestor }
-  })
+  }, LEDGER_TX_OPTIONS)
 
   await invalidateInvestorCaches(company.id, investor.siteId)
   await invalidateInvestorDetailCaches(investor.id)
 
+  const [view, transaction] = await Promise.all([
+    getInvestorView(investor.id),
+    getTransactionView(transactionId),
+  ])
+
   return jsonOk(c, {
-    transaction: {
-      id: result.transaction.id,
-      amount: result.transaction.amount,
-      note: result.transaction.note,
-      amountPaid: result.transaction.amountPaid,
-      paymentDate: result.transaction.paymentDate ? result.transaction.paymentDate.toISOString() : null,
-      paymentStatus: result.transaction.paymentStatus,
-      createdAt: result.transaction.createdAt.toISOString(),
-    },
-    investor: {
-      id: result.updatedInvestor.id,
-      name: result.updatedInvestor.name,
-      type: result.updatedInvestor.type,
-      totalInvested: result.updatedInvestor.totalInvested,
-      totalReturned: result.updatedInvestor.totalReturned,
-      isClosed: result.updatedInvestor.isClosed,
-    },
+    transaction: transaction!,
+    investor: view!.investor,
   }) as any
 })
 
@@ -818,6 +845,9 @@ const getTransactionsRoute = createRoute({
             data: z.object({
               transactions: z.array(transactionResponseSchema),
               totalInvested: z.number(),
+              totalReturned: z.number(),
+              interestPaid: z.number(),
+              outstandingPrincipal: z.number(),
             }),
           }),
         },
@@ -842,23 +872,15 @@ investorRoutes.openapi(getTransactionsRoute, async (c) => {
   const cached = await cacheService.get<any>(cacheKey)
   if (cached) return jsonOk(c, cached) as any
 
-  const transactions = await prisma.investorTransaction.findMany({
-    where: { investorId: id },
-    orderBy: { createdAt: 'desc' },
-  })
+  const view = await getInvestorView(id)
+  if (!view) return jsonError(c, 'Investor not found', 404) as any
 
   const responseData = {
-    transactions: transactions.map((t) => ({
-      id: t.id,
-      amount: t.amount,
-      note: t.note,
-      amountPaid: t.amountPaid,
-      paymentDate: t.paymentDate ? t.paymentDate.toISOString() : null,
-      paymentStatus: t.paymentStatus,
-      createdAt: t.createdAt.toISOString(),
-    })),
-    totalInvested: investor.totalInvested,
-    totalReturned: investor.totalReturned,
+    transactions: view.transactions,
+    totalInvested: view.investor.totalInvested,
+    totalReturned: view.investor.totalReturned,
+    interestPaid: view.investor.interestPaid,
+    outstandingPrincipal: view.investor.outstandingPrincipal,
   }
   await cacheService.set(cacheKey, responseData, CacheTTL.ENTITY_LIST)
   return jsonOk(c, responseData) as any
@@ -880,6 +902,7 @@ const updateTransactionPaymentRoute = createRoute({
           schema: z.object({
             amount: z.number().positive(),
             note: z.string().optional(),
+            idempotencyKey: z.string().optional(),
           }),
         },
       },
@@ -892,7 +915,13 @@ const updateTransactionPaymentRoute = createRoute({
           schema: z.object({
             ok: z.literal(true),
             data: z.object({
-              transaction: z.object({ id: z.string(), amountPaid: z.number(), paymentStatus: z.string() }),
+              transaction: z.object({
+                id: z.string(),
+                kind: investorTransactionKindEnum,
+                amountPaid: z.number(),
+                remaining: z.number(),
+                paymentStatus: paymentStatusEnum,
+              }),
               payment: z.object({ id: z.string(), amount: z.number(), createdAt: z.string().datetime() }),
             }),
           }),
@@ -908,8 +937,8 @@ const updateTransactionPaymentRoute = createRoute({
 investorRoutes.openapi(updateTransactionPaymentRoute, async (c) => {
   const auth = c.get('auth')
   const { id, transactionId } = c.req.valid('param')
-  const parsed = c.req.valid('json')
-  
+  const { amount, note, idempotencyKey } = c.req.valid('json')
+
   const { investor, company } = await getInvestorForUser(id, auth.userId)
   if (!investor || !company) return jsonError(c, 'Investor not found', 404) as any
 
@@ -918,42 +947,53 @@ investorRoutes.openapi(updateTransactionPaymentRoute, async (c) => {
   })
   if (!transaction) return jsonError(c, 'Transaction not found', 404) as any
 
-  const { amount, note } = parsed
-  const absAmount = Math.abs(transaction.amount)
-  const newTotal = transaction.amountPaid + amount
+  const currentPaid = await getInvestorTransactionPaidTotal(transactionId)
+  const newTotal = currentPaid + amount
 
-  if (newTotal > absAmount) {
-    return jsonError(c, `Payment of ${amount} would exceed the transaction total (${absAmount}). Remaining: ${absAmount - transaction.amountPaid}`, 400) as any
+  if (newTotal > transaction.amount) {
+    return jsonError(c, 'AMOUNT_EXCEEDS_LIMIT', 400) as any
   }
 
-  const paymentStatus = newTotal >= absAmount ? 'COMPLETED' : newTotal > 0 ? 'PARTIAL' : 'PENDING'
+  const ledgerConfig = resolveLedgerConfig(investor, transaction.kind)
 
-  const result = await prisma.$transaction(async (tx: any) => {
-    const payment = await tx.payment.create({
-      data: {
-        companyId: company.id,
-        siteId: investor.siteId,
-        entityType: 'INVESTOR_TRANSACTION',
-        entityId: transactionId,
-        amount,
-        note: note || 'Payment for investor transaction',
-      },
-    })
+  const result = await prisma.$transaction(async (tx) => {
+    const payment = await createLedgerEntry({
+      companyId: company.id,
+      siteId: ledgerConfig.siteId,
+      walletType: ledgerConfig.walletType,
+      direction: ledgerConfig.direction,
+      movementType: ledgerConfig.movementType,
+      amount: new Prisma.Decimal(amount),
+      idempotencyKey: idempotencyKey ?? `investor-payment:${transactionId}:${Date.now()}`,
+      note: note ?? getDefaultLedgerNote(transaction.kind),
+      investorTransactionId: transactionId,
+    }, tx)
 
-    const updated = await tx.investorTransaction.update({
-      where: { id: transactionId },
-      data: { amountPaid: newTotal, paymentDate: new Date(), paymentStatus },
-    })
+    await syncInvestorClosedState(investor.id, tx)
 
-    return { payment, updated }
-  })
+    const amountPaid = await getInvestorTransactionPaidTotal(transactionId, tx)
+    const remaining = await getInvestorTransactionRemaining(transactionId, tx)
+    const paymentStatus = deriveInvestorTransactionPaymentStatus(transaction.amount, amountPaid)
 
-  cacheService.del(CacheKeys.investorTransactions(investor.id))
+    return { payment, amountPaid, remaining, paymentStatus }
+  }, LEDGER_TX_OPTIONS)
+
   await invalidateInvestorCaches(company.id, investor.siteId)
+  await invalidateInvestorDetailCaches(investor.id)
 
   return jsonOk(c, {
-    transaction: { id: result.updated.id, amountPaid: result.updated.amountPaid, paymentStatus: result.updated.paymentStatus },
-    payment: { id: result.payment.id, amount: result.payment.amount, createdAt: result.payment.createdAt },
+    transaction: {
+      id: transaction.id,
+      kind: transaction.kind,
+      amountPaid: result.amountPaid,
+      remaining: result.remaining,
+      paymentStatus: result.paymentStatus,
+    },
+    payment: {
+      id: result.payment.id,
+      amount: Number(result.payment.amount),
+      createdAt: result.payment.postedAt,
+    },
   }) as any
 })
 
@@ -994,14 +1034,31 @@ const getTransactionPaymentsRoute = createRoute({
 investorRoutes.openapi(getTransactionPaymentsRoute, async (c) => {
   const auth = c.get('auth')
   const { id, transactionId } = c.req.valid('param')
-  const { investor } = await getInvestorForUser(id, auth.userId)
-  if (!investor) return jsonError(c, 'Investor not found', 404) as any
+  const { investor, company } = await getInvestorForUser(id, auth.userId)
+  if (!investor || !company) return jsonError(c, 'Investor not found', 404) as any
+
+  const transaction = await prisma.investorTransaction.findFirst({
+    where: { id: transactionId, investorId: investor.id, isDeleted: false },
+  })
+  if (!transaction) return jsonError(c, 'Transaction not found', 404) as any
 
   const payments = await prisma.payment.findMany({
-    where: { entityType: 'INVESTOR_TRANSACTION', entityId: transactionId },
-    orderBy: { createdAt: 'desc' },
+    where: {
+      companyId: company.id,
+      investorTransactionId: transactionId,
+    },
+    orderBy: { postedAt: 'desc' },
   })
 
-  return jsonOk(c, { payments }) as any
+  return jsonOk(c, {
+    payments: payments.map((payment) => ({
+      id: payment.id,
+      amount: Number(payment.amount),
+      note: payment.note,
+      createdAt: payment.postedAt,
+    })),
+  }) as any
 })
+
+
 

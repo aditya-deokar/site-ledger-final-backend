@@ -1,14 +1,18 @@
+import { Prisma } from '@prisma/client'
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi'
 import type { AuthContext } from '../types/auth.js'
 import { prisma } from '../db/prisma.js'
 import { requireJwt } from '../middlewares/jwt.js'
 import { jsonError, jsonOk } from '../utils/response.js'
 import { getCompanyForUser } from '../utils/company.js'
+import { getCustomerPaidTotal, getCustomerRemaining, sumLedgerAmounts } from '../services/customer-ledger.service.js'
+import { createLedgerEntry } from '../services/ledger.service.js'
 import { invalidateCustomerCaches } from '../services/cache-invalidation.js'
 import { cacheService } from '../services/cache.service.js'
 import { CacheKeys, CacheTTL } from '../config/cache-keys.js'
 
 export const customerRoutes = new OpenAPIHono<{ Variables: AuthContext['Variables'] }>()
+const LEDGER_TX_OPTIONS = { maxWait: 15000, timeout: 20000 } as const
 
 customerRoutes.use('*', requireJwt)
 
@@ -27,7 +31,6 @@ const updateCustomerSchema = z.object({
   name: z.string().min(1).optional(),
   phone: z.string().optional(),
   email: z.string().email().optional(),
-  amountPaid: z.number().min(0).optional(),
 })
 
 const customerResponseSchema = z.object({
@@ -130,9 +133,11 @@ customerRoutes.openapi(getAllCustomersRoute, async (c) => {
   const customers = await prisma.customer.findMany({
     where: {
       companyId: company.id,
+      isDeleted: false,
       ...(status ? { flat: { status } } : {}),
     },
     include: {
+      ledgerEntries: { select: { amount: true } },
       flat: { include: { floor: true } },
       site: { select: { id: true, name: true } },
     },
@@ -140,23 +145,26 @@ customerRoutes.openapi(getAllCustomersRoute, async (c) => {
   })
 
   const responseData = {
-    customers: customers.map((cu) => ({
-      id: cu.id,
-      name: cu.name,
-      phone: cu.phone,
-      email: cu.email,
-      sellingPrice: cu.sellingPrice,
-      bookingAmount: cu.bookingAmount,
-      amountPaid: cu.amountPaid,
-      remaining: cu.sellingPrice - cu.amountPaid,
-      flatId: cu.flatId,
-      flatNumber: cu.flat?.flatNumber ?? null,
-      floorNumber: cu.flat?.floor?.floorNumber ?? null,
-      flatStatus: cu.flat?.status ?? null,
-      siteId: cu.siteId,
-      siteName: cu.site?.name ?? null,
-      createdAt: cu.createdAt,
-    })),
+    customers: customers.map((cu) => {
+      const amountPaid = sumLedgerAmounts(cu.ledgerEntries)
+      return {
+        id: cu.id,
+        name: cu.name,
+        phone: cu.phone,
+        email: cu.email,
+        sellingPrice: cu.sellingPrice,
+        bookingAmount: cu.bookingAmount,
+        amountPaid,
+        remaining: cu.sellingPrice - amountPaid,
+        flatId: cu.flatId,
+        flatNumber: cu.flat?.flatNumber ?? null,
+        floorNumber: cu.flat?.floor?.floorNumber ?? null,
+        flatStatus: cu.flat?.status ?? null,
+        siteId: cu.siteId,
+        siteName: cu.site?.name ?? null,
+        createdAt: cu.createdAt,
+      }
+    }),
   }
   await cacheService.set(cacheKey, responseData, CacheTTL.ENTITY_LIST)
   return jsonOk(c, responseData) as any
@@ -213,7 +221,7 @@ customerRoutes.openapi(bookFlatRoute, async (c) => {
   const { name, phone, email, sellingPrice, bookingAmount } = parsed.data
 
   if (bookingAmount > sellingPrice) {
-    return jsonError(c, 'Booking amount cannot exceed selling price', 400) as any
+    return jsonError(c, 'AMOUNT_EXCEEDS_LIMIT', 400) as any
   }
 
   // Transaction: check flat is AVAILABLE, create customer, update flat status, create payment
@@ -237,22 +245,22 @@ customerRoutes.openapi(bookFlatRoute, async (c) => {
         email,
         sellingPrice,
         bookingAmount,
-        amountPaid: bookingAmount,
         customerType: forcedCustomerType,
       },
     })
 
     if (bookingAmount > 0) {
-      await tx.payment.create({
-        data: {
-          companyId: company.id,
-          siteId: site.id,
-          entityType: 'CUSTOMER',
-          entityId: customer.id,
-          amount: bookingAmount,
-          note: 'Initial booking amount',
-        },
-      })
+      await createLedgerEntry({
+        companyId: company.id,
+        siteId: site.id,
+        walletType: 'SITE',
+        direction: 'IN',
+        movementType: 'CUSTOMER_PAYMENT',
+        amount: new Prisma.Decimal(bookingAmount),
+        idempotencyKey: `customer-booking:${customer.id}:${Date.now()}`,
+        note: 'Initial booking amount',
+        customerId: customer.id,
+      }, tx)
     }
 
     const newStatus = bookingAmount >= sellingPrice ? 'SOLD' as const : 'BOOKED' as const
@@ -261,13 +269,18 @@ customerRoutes.openapi(bookFlatRoute, async (c) => {
       data: { status: newStatus },
     })
 
+    const amountPaid = await getCustomerPaidTotal(customer.id, tx)
+    const remaining = await getCustomerRemaining(customer.id, tx)
+
     return {
       customer,
       flatNumber: flat.flatNumber,
       floorNumber: flat.floor.floorNumber,
       flatStatus: newStatus,
+      amountPaid,
+      remaining,
     }
-  }).catch((err: any) => {
+  }, LEDGER_TX_OPTIONS).catch((err: any) => {
     if (err.message === 'FLAT_NOT_FOUND') return { error: 'Flat not found', status: 404 }
     if (err.message === 'FLAT_NOT_AVAILABLE') return { error: 'Flat is not available for booking', status: 400 }
     throw err
@@ -288,8 +301,8 @@ customerRoutes.openapi(bookFlatRoute, async (c) => {
       email: result.customer.email,
       sellingPrice: result.customer.sellingPrice,
       bookingAmount: result.customer.bookingAmount,
-      amountPaid: result.customer.amountPaid,
-      remaining: result.customer.sellingPrice - result.customer.amountPaid,
+      amountPaid: result.amountPaid,
+      remaining: result.remaining,
       customerType: result.customer.customerType,
       flatId: result.customer.flatId,
       flatNumber: result.flatNumber,
@@ -346,30 +359,34 @@ customerRoutes.openapi(getSiteCustomersRoute, async (c) => {
   const customers = await prisma.customer.findMany({
     where: { siteId: site.id, isDeleted: false },
     include: {
+      ledgerEntries: { select: { amount: true } },
       flat: { include: { floor: true } },
     },
     orderBy: { createdAt: 'desc' },
   })
 
   const responseData = {
-    customers: customers.map((cu) => ({
-      id: cu.id,
-      name: cu.name,
-      phone: cu.phone,
-      email: cu.email,
-      sellingPrice: cu.sellingPrice,
-      bookingAmount: cu.bookingAmount,
-      amountPaid: cu.amountPaid,
-      remaining: cu.sellingPrice - cu.amountPaid,
-      customerType: cu.customerType,
-      flatId: cu.flatId,
-      flatNumber: cu.flat!.flatNumber,
-      floorNumber: cu.flat!.floor.floorNumber,
-      customFlatId: cu.flat!.customFlatId ?? null,
-      floorName: cu.flat!.floor.floorName ?? null,
-      flatStatus: cu.flat!.status,
-      createdAt: cu.createdAt,
-    })),
+    customers: customers.map((cu) => {
+      const amountPaid = sumLedgerAmounts(cu.ledgerEntries)
+      return {
+        id: cu.id,
+        name: cu.name,
+        phone: cu.phone,
+        email: cu.email,
+        sellingPrice: cu.sellingPrice,
+        bookingAmount: cu.bookingAmount,
+        amountPaid,
+        remaining: cu.sellingPrice - amountPaid,
+        customerType: cu.customerType,
+        flatId: cu.flatId,
+        flatNumber: cu.flat!.flatNumber,
+        floorNumber: cu.flat!.floor.floorNumber,
+        customFlatId: cu.flat!.customFlatId ?? null,
+        floorName: cu.flat!.floor.floorName ?? null,
+        flatStatus: cu.flat!.status,
+        createdAt: cu.createdAt,
+      }
+    }),
   }
   await cacheService.set(cacheKey, responseData, CacheTTL.ENTITY_LIST)
   return jsonOk(c, responseData) as any
@@ -418,9 +435,14 @@ customerRoutes.openapi(getFlatCustomerRoute, async (c) => {
 
   const customer = await prisma.customer.findFirst({
     where: { flatId, siteId: site.id, isDeleted: false },
-    include: { flat: { include: { floor: true } } },
+    include: {
+      ledgerEntries: { select: { amount: true } },
+      flat: { include: { floor: true } },
+    },
   })
   if (!customer) return jsonError(c, 'No customer found for this flat', 404) as any
+
+  const amountPaid = sumLedgerAmounts(customer.ledgerEntries)
 
   const responseData = {
     customer: {
@@ -430,8 +452,8 @@ customerRoutes.openapi(getFlatCustomerRoute, async (c) => {
       email: customer.email,
       sellingPrice: customer.sellingPrice,
       bookingAmount: customer.bookingAmount,
-      amountPaid: customer.amountPaid,
-      remaining: customer.sellingPrice - customer.amountPaid,
+      amountPaid,
+      remaining: customer.sellingPrice - amountPaid,
       customerType: customer.customerType,
       flatId: customer.flatId,
       flatNumber: customer.flat!.flatNumber,
@@ -451,7 +473,7 @@ const updateCustomerRoute = createRoute({
   path: '/{siteId}/flats/{flatId}/customer/{id}',
   tags: ['Customers'],
   summary: 'Update customer details',
-  description: 'Update customer info or payment. If amountPaid reaches sellingPrice, flat status is automatically set to SOLD.',
+  description: 'Update customer info only. Paid amount and remaining are derived from the ledger, and flat status is recalculated from ledger-backed payments.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ siteId: z.string(), flatId: z.string(), id: z.string() }),
@@ -497,27 +519,30 @@ customerRoutes.openapi(updateCustomerRoute, async (c) => {
   })
   if (!existing) return jsonError(c, 'Customer not found', 404) as any
 
-  if (parsed.data.amountPaid !== undefined && parsed.data.amountPaid > existing.sellingPrice) {
-    return jsonError(c, 'Amount paid cannot exceed selling price', 400) as any
-  }
-
   // Transaction: update customer + auto-update flat status
   const result = await prisma.$transaction(async (tx) => {
     const customer = await tx.customer.update({
       where: { id },
       data: parsed.data,
-      include: { flat: { include: { floor: true } } },
+      include: {
+        ledgerEntries: { select: { amount: true } },
+        flat: { include: { floor: true } },
+      },
     })
+
+    const amountPaid = sumLedgerAmounts(customer.ledgerEntries)
 
     // Auto-update flat status based on payment
     let flatStatus = customer.flat!.status
-    if (customer.amountPaid >= customer.sellingPrice && flatStatus !== 'SOLD') {
+    if (amountPaid >= customer.sellingPrice && flatStatus !== 'SOLD') {
       await tx.flat.update({ where: { id: flatId }, data: { status: 'SOLD' } })
       flatStatus = 'SOLD'
     }
 
-    return { customer, flatStatus }
-  })
+    const remaining = await getCustomerRemaining(customer.id, tx)
+
+    return { customer, flatStatus, amountPaid, remaining }
+  }, LEDGER_TX_OPTIONS)
 
   const { company: updateCompany } = await verifySiteOwnership(siteId, auth.userId)
   if (updateCompany) await invalidateCustomerCaches(updateCompany.id, siteId)
@@ -531,8 +556,8 @@ customerRoutes.openapi(updateCustomerRoute, async (c) => {
       email: result.customer.email,
       sellingPrice: result.customer.sellingPrice,
       bookingAmount: result.customer.bookingAmount,
-      amountPaid: result.customer.amountPaid,
-      remaining: result.customer.sellingPrice - result.customer.amountPaid,
+      amountPaid: result.amountPaid,
+      remaining: result.remaining,
       customerType: result.customer.customerType,
       flatId: result.customer.flatId,
       flatNumber: result.customer.flat!.flatNumber,
@@ -620,6 +645,7 @@ const recordCustomerPaymentRoute = createRoute({
           schema: z.object({
             amount: z.number().positive(),
             note: z.string().optional(),
+            idempotencyKey: z.string().optional(),
           }),
         },
       },
@@ -648,37 +674,35 @@ const recordCustomerPaymentRoute = createRoute({
 customerRoutes.openapi(recordCustomerPaymentRoute, async (c) => {
   const auth = c.get('auth')
   const { id } = c.req.valid('param')
-  const { amount, note } = c.req.valid('json')
+  const { amount, note, idempotencyKey } = c.req.valid('json')
 
   const company = await getCompanyForUser(auth.userId)
   if (!company) return jsonError(c, 'Company not found', 404) as any
 
   const customer = await prisma.customer.findFirst({
     where: { id, companyId: company.id, isDeleted: false },
+    include: { ledgerEntries: { select: { amount: true } } },
   })
   if (!customer) return jsonError(c, 'Customer not found', 404) as any
 
-  const newTotal = customer.amountPaid + amount
+  const currentPaid = sumLedgerAmounts(customer.ledgerEntries)
+  const newTotal = currentPaid + amount
   if (newTotal > customer.sellingPrice) {
-    return jsonError(c, `Payment exceeds selling price. Remaining: ${customer.sellingPrice - customer.amountPaid}`, 400) as any
+    return jsonError(c, 'AMOUNT_EXCEEDS_LIMIT', 400) as any
   }
 
   const result = await prisma.$transaction(async (tx: any) => {
-    const payment = await tx.payment.create({
-      data: {
-        companyId: company.id,
-        siteId: customer.siteId,
-        entityType: 'CUSTOMER',
-        entityId: id,
-        amount,
-        note: note || 'Installment payment',
-      },
-    })
-
-    const updatedCustomer = await tx.customer.update({
-      where: { id },
-      data: { amountPaid: newTotal },
-    })
+    const payment = await createLedgerEntry({
+      companyId: company.id,
+      siteId: customer.siteId,
+      walletType: 'SITE',
+      direction: 'IN',
+      movementType: 'CUSTOMER_PAYMENT',
+      amount: new Prisma.Decimal(amount),
+      idempotencyKey: idempotencyKey ?? `customer-payment:${id}:${Date.now()}`,
+      note: note || 'Installment payment',
+      customerId: id,
+    }, tx)
 
     // If fully paid, ensure flat is SOLD
     if (newTotal >= customer.sellingPrice && customer.flatId) {
@@ -688,22 +712,25 @@ customerRoutes.openapi(recordCustomerPaymentRoute, async (c) => {
       })
     }
 
-    return { payment, updatedCustomer }
-  })
+    const amountPaid = await getCustomerPaidTotal(customer.id, tx)
+    const remaining = await getCustomerRemaining(customer.id, tx)
+
+    return { payment, amountPaid, remaining }
+  }, LEDGER_TX_OPTIONS)
 
   await invalidateCustomerCaches(company.id, customer.siteId!)
   if (customer.flatId) await cacheService.del(CacheKeys.flatCustomer(customer.flatId))
 
   return jsonOk(c, {
     customer: {
-      id: result.updatedCustomer.id,
-      amountPaid: result.updatedCustomer.amountPaid,
-      remaining: result.updatedCustomer.sellingPrice - result.updatedCustomer.amountPaid,
+      id: customer.id,
+      amountPaid: result.amountPaid,
+      remaining: result.remaining,
     },
     payment: {
       id: result.payment.id,
-      amount: result.payment.amount,
-      createdAt: result.payment.createdAt,
+      amount: Number(result.payment.amount),
+      createdAt: result.payment.postedAt,
     },
   }) as any
 })
@@ -754,10 +781,17 @@ customerRoutes.openapi(getCustomerPaymentsRoute, async (c) => {
   if (!customer) return jsonError(c, 'Customer not found', 404) as any
 
   const payments = await prisma.payment.findMany({
-    where: { entityType: 'CUSTOMER', entityId: id },
-    orderBy: { createdAt: 'desc' },
+    where: { customerId: id, companyId: company.id },
+    orderBy: { postedAt: 'desc' },
   })
 
-  return jsonOk(c, { payments }) as any
+  return jsonOk(c, {
+    payments: payments.map((payment) => ({
+      id: payment.id,
+      amount: Number(payment.amount),
+      note: payment.note,
+      createdAt: payment.postedAt,
+    })),
+  }) as any
 })
 

@@ -6,6 +6,7 @@ export const CacheKeys = {
   companyByUser: (userId: string) => `gaa:company:user:${userId}`,
   companyDetails: (companyId: string) => `gaa:company:details:${companyId}`,
   companyExpenses: (companyId: string) => `gaa:company:expenses:${companyId}`,
+  companyWithdrawalList: (companyId: string) => `gaa:company:withdrawals:${companyId}`,
 
   // Fund calculations (company-level)
   companyPartnerFund: (companyId: string) => `gaa:fund:company:partner:${companyId}`,
@@ -40,6 +41,8 @@ export const CacheKeys = {
   vendorList: (companyId: string) => `gaa:vendors:list:${companyId}`,
   vendorDetail: (vendorId: string) => `gaa:vendors:detail:${vendorId}`,
   vendorTransactions: (vendorId: string) => `gaa:vendors:txns:${vendorId}`,
+  vendorPayments: (vendorId: string) => `gaa:vendors:payments:${vendorId}`,
+  vendorStatement: (vendorId: string) => `gaa:vendors:statement:${vendorId}`,
   customerList: (companyId: string) => `gaa:customers:list:${companyId}`,
   flatCustomer: (flatId: string) => `gaa:customers:flat:${flatId}`,
   investorList: (companyId: string) => `gaa:investors:list:${companyId}`,
