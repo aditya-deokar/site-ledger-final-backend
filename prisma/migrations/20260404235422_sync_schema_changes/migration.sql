@@ -1,4 +1,7 @@
 -- CreateEnum
+CREATE TYPE "VerificationType" AS ENUM ('SIGNUP', 'PASSWORD_RESET');
+
+-- CreateEnum
 CREATE TYPE "ExpenseType" AS ENUM ('GENERAL', 'VENDOR');
 
 -- CreateEnum
@@ -29,12 +32,26 @@ CREATE TABLE "User" (
     "passwordHash" TEXT NOT NULL,
     "firstName" TEXT,
     "lastName" TEXT,
+    "refreshToken" TEXT,
     "passwordResetToken" TEXT,
     "passwordResetExpiry" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "User_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "VerificationCode" (
+    "id" TEXT NOT NULL,
+    "email" TEXT NOT NULL,
+    "code" TEXT NOT NULL,
+    "type" "VerificationType" NOT NULL,
+    "payload" JSONB,
+    "expiresAt" TIMESTAMP(3) NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "VerificationCode_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -222,6 +239,9 @@ CREATE TABLE "Payment" (
 
 -- CreateIndex
 CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "VerificationCode_email_type_key" ON "VerificationCode"("email", "type");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Company_createdBy_key" ON "Company"("createdBy");
