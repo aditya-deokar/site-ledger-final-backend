@@ -737,7 +737,7 @@ companyRoutes.openapi(addWithdrawalPaymentRoute, async (c) => {
     payment: {
       id: result.payment.id,
       amount: Number(result.payment.amount),
-      createdAt: result.payment.postedAt,
+      createdAt: result.payment.postedAt.toISOString(),
     },
     availableFund: await getCompanyAvailableFund(company.id),
   }) as any
@@ -797,7 +797,7 @@ companyRoutes.openapi(getWithdrawalPaymentsRoute, async (c) => {
       id: payment.id,
       amount: Number(payment.amount),
       note: payment.note,
-      createdAt: payment.postedAt,
+      createdAt: payment.postedAt.toISOString(),
     })),
   }) as any
 })
