@@ -1,12 +1,23 @@
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi'
 import type { AuthContext } from '../../types/auth.js'
 import { jsonError, jsonOk } from '../../utils/response.js'
-import { createFlatSchema, createFloorSchema, errorResponseSchema, updateFlatSchema } from './sites.schema.js'
+import {
+  createFlatSchema,
+  createFloorSchema,
+  errorResponseSchema,
+  updateFlatDetailsSchema,
+  updateFlatSchema,
+  updateFloorSchema,
+} from './sites.schema.js'
 import {
   createFlatForUser,
   createFloorForUser,
+  deleteFlatForUser,
+  deleteFloorForUser,
   getFloorsForUser,
+  updateFlatDetailsForUser,
   updateFlatForUser,
+  updateFloorForUser,
 } from './site-structures.service.js'
 
 type SiteRouteApp = OpenAPIHono<{ Variables: AuthContext['Variables'] }>
@@ -205,6 +216,116 @@ export function registerSiteStructureRoutes(siteRoutes: SiteRouteApp) {
     return jsonOk(c, responseData) as any
   })
 
+  const updateFloorRoute = createRoute({
+    method: 'patch',
+    path: '/{id}/floors/{floorId}',
+    tags: ['Floors & Flats'],
+    summary: 'Update floor details',
+    description: 'Update the floor name for a site floor.',
+    security: [{ bearerAuth: [] }],
+    request: {
+      params: z.object({ id: z.string(), floorId: z.string() }),
+      body: {
+        content: { 'application/json': { schema: updateFloorSchema } },
+      },
+    },
+    responses: {
+      200: {
+        content: {
+          'application/json': {
+            schema: z.object({
+              ok: z.literal(true),
+              data: z.object({
+                floor: z.object({
+                  id: z.string(),
+                  floorNumber: z.number(),
+                  floorName: z.string().nullable(),
+                }),
+              }),
+            }),
+          },
+        },
+        description: 'Floor updated',
+      },
+      400: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Bad request',
+      },
+      404: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Floor not found',
+      },
+    },
+  })
+
+  siteRoutes.openapi(updateFloorRoute, async (c) => {
+    const auth = c.get('auth')
+    const { id, floorId } = c.req.valid('param')
+    const body = await c.req.json().catch(() => null)
+    const parsed = updateFloorSchema.safeParse(body)
+    if (!parsed.success) return jsonError(c, 'Invalid request body', 400) as any
+
+    const updated = await updateFloorForUser(id, floorId, auth.userId, parsed.data)
+    if (!updated) return jsonError(c, 'Site not found', 404) as any
+    if ('error' in updated) return jsonError(c, updated.error, updated.status) as any
+
+    return jsonOk(c, {
+      floor: {
+        id: updated.id,
+        floorNumber: updated.floorNumber,
+        floorName: updated.floorName,
+      },
+    }) as any
+  })
+
+  const deleteFloorRoute = createRoute({
+    method: 'delete',
+    path: '/{id}/floors/{floorId}',
+    tags: ['Floors & Flats'],
+    summary: 'Delete a floor',
+    description: 'Deletes a floor only when it has no flats.',
+    security: [{ bearerAuth: [] }],
+    request: {
+      params: z.object({ id: z.string(), floorId: z.string() }),
+    },
+    responses: {
+      200: {
+        content: {
+          'application/json': {
+            schema: z.object({
+              ok: z.literal(true),
+              data: z.object({
+                deletedFloorId: z.string(),
+              }),
+            }),
+          },
+        },
+        description: 'Floor deleted',
+      },
+      400: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Cannot delete floor',
+      },
+      404: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Floor not found',
+      },
+    },
+  })
+
+  siteRoutes.openapi(deleteFloorRoute, async (c) => {
+    const auth = c.get('auth')
+    const { id, floorId } = c.req.valid('param')
+
+    const deleted = await deleteFloorForUser(id, floorId, auth.userId)
+    if (!deleted) return jsonError(c, 'Site not found', 404) as any
+    if ('error' in deleted) return jsonError(c, deleted.error ?? 'Could not delete floor', deleted.status) as any
+
+    return jsonOk(c, {
+      deletedFloorId: deleted.id,
+    }) as any
+  })
+
   const updateFlatRoute = createRoute({
     method: 'put',
     path: '/{id}/floors/{floorId}/flats/{flatId}',
@@ -266,6 +387,118 @@ export function registerSiteStructureRoutes(siteRoutes: SiteRouteApp) {
         customFlatId: updated.customFlatId,
         status: updated.status,
       },
+    }) as any
+  })
+
+  const updateFlatDetailsRoute = createRoute({
+    method: 'patch',
+    path: '/{id}/flats/{flatId}',
+    tags: ['Floors & Flats'],
+    summary: 'Update flat details',
+    description: 'Update the flat ID and flat type for an available, unassigned flat.',
+    security: [{ bearerAuth: [] }],
+    request: {
+      params: z.object({ id: z.string(), flatId: z.string() }),
+      body: {
+        content: { 'application/json': { schema: updateFlatDetailsSchema } },
+      },
+    },
+    responses: {
+      200: {
+        content: {
+          'application/json': {
+            schema: z.object({
+              ok: z.literal(true),
+              data: z.object({
+                flat: z.object({
+                  id: z.string(),
+                  customFlatId: z.string().nullable(),
+                  flatType: z.string(),
+                  status: z.string(),
+                }),
+              }),
+            }),
+          },
+        },
+        description: 'Flat details updated',
+      },
+      400: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Cannot edit flat',
+      },
+      404: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Flat not found',
+      },
+    },
+  })
+
+  siteRoutes.openapi(updateFlatDetailsRoute, async (c) => {
+    const auth = c.get('auth')
+    const { id, flatId } = c.req.valid('param')
+    const body = await c.req.json().catch(() => null)
+    const parsed = updateFlatDetailsSchema.safeParse(body)
+    if (!parsed.success) return jsonError(c, 'Invalid request body', 400) as any
+
+    const updated = await updateFlatDetailsForUser(id, flatId, auth.userId, parsed.data)
+    if (!updated) return jsonError(c, 'Site not found', 404) as any
+    if ('error' in updated) return jsonError(c, updated.error, updated.status) as any
+
+    return jsonOk(c, {
+      flat: {
+        id: updated.id,
+        customFlatId: updated.customFlatId,
+        flatType: updated.flatType,
+        status: updated.status,
+      },
+    }) as any
+  })
+
+  const deleteFlatRoute = createRoute({
+    method: 'delete',
+    path: '/{id}/flats/{flatId}',
+    tags: ['Floors & Flats'],
+    summary: 'Delete a flat',
+    description: 'Deletes a flat only when it is available and not linked to a customer.',
+    security: [{ bearerAuth: [] }],
+    request: {
+      params: z.object({ id: z.string(), flatId: z.string() }),
+    },
+    responses: {
+      200: {
+        content: {
+          'application/json': {
+            schema: z.object({
+              ok: z.literal(true),
+              data: z.object({
+                deletedFlatId: z.string(),
+              }),
+            }),
+          },
+        },
+        description: 'Flat deleted',
+      },
+      400: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Cannot delete flat',
+      },
+      404: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Flat not found',
+      },
+    },
+  })
+
+  siteRoutes.openapi(deleteFlatRoute, async (c) => {
+    const auth = c.get('auth')
+    const { id, flatId } = c.req.valid('param')
+
+    const deleted = await deleteFlatForUser(id, flatId, auth.userId)
+    if (!deleted) return jsonError(c, 'Site not found', 404) as any
+    if ('error' in deleted) return jsonError(c, deleted.error ?? 'Could not delete flat', deleted.status) as any
+
+    return jsonOk(c, {
+      deletedFlatId: deleted.id,
     }) as any
   })
 }
