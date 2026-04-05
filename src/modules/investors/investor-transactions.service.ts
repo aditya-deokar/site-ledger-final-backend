@@ -1,0 +1,383 @@
+import { Prisma, type InvestorTransactionKind } from '@prisma/client'
+import { prisma } from '../../db/prisma.js'
+import { createLedgerEntry } from '../../services/ledger.service.js'
+import {
+  deriveInvestorTransactionPaymentStatus,
+  getInvestorLedgerSummary,
+  getInvestorTransactionPaidTotal,
+  getInvestorTransactionRemaining,
+  syncInvestorClosedState,
+} from '../../services/investor-ledger.service.js'
+import { invalidateInvestorCaches, invalidateInvestorDetailCaches } from '../../services/cache-invalidation.js'
+import { cacheService } from '../../services/cache.service.js'
+import { CacheKeys, CacheTTL } from '../../config/cache-keys.js'
+import { LEDGER_TX_OPTIONS } from '../../shared/constants/ledger.js'
+import { getInvestorForUser } from './investor-access.service.js'
+import {
+  getInvestorView,
+  getTransactionView,
+  type InvestorServiceError,
+  type InvestorTransactionView,
+  type InvestorView,
+} from './investors.service.js'
+
+function resolveLedgerConfig(
+  investor: { siteId: string | null },
+  kind: 'PRINCIPAL_IN' | 'PRINCIPAL_OUT' | 'INTEREST',
+) {
+  const walletType = investor.siteId ? 'SITE' as const : 'COMPANY' as const
+
+  if (kind === 'PRINCIPAL_IN') {
+    return {
+      siteId: investor.siteId,
+      walletType,
+      direction: 'IN' as const,
+      movementType: 'INVESTOR_PRINCIPAL_IN' as const,
+    }
+  }
+
+  if (kind === 'PRINCIPAL_OUT') {
+    return {
+      siteId: investor.siteId,
+      walletType,
+      direction: 'OUT' as const,
+      movementType: 'INVESTOR_PRINCIPAL_OUT' as const,
+    }
+  }
+
+  return {
+    siteId: investor.siteId,
+    walletType,
+    direction: 'OUT' as const,
+    movementType: 'INVESTOR_INTEREST' as const,
+  }
+}
+
+function getDefaultLedgerNote(kind: 'PRINCIPAL_IN' | 'PRINCIPAL_OUT' | 'INTEREST') {
+  if (kind === 'PRINCIPAL_IN') return 'Investor principal received'
+  if (kind === 'PRINCIPAL_OUT') return 'Investor principal payout'
+  return 'Investor interest payout'
+}
+
+async function createInvestorTransactionDocumentWithLedger(
+  tx: Prisma.TransactionClient,
+  input: {
+    companyId: string
+    investor: { id: string; siteId: string | null }
+    kind: 'PRINCIPAL_IN' | 'PRINCIPAL_OUT' | 'INTEREST'
+    amount: number
+    amountPaid: number
+    note?: string
+    paymentDate?: string
+    idempotencyKey?: string
+  },
+) {
+  const transaction = await tx.investorTransaction.create({
+    data: {
+      investorId: input.investor.id,
+      kind: input.kind,
+      amount: input.amount,
+      note: input.note ?? null,
+    },
+  })
+
+  if (input.amountPaid > 0) {
+    const ledgerConfig = resolveLedgerConfig(input.investor, input.kind)
+
+    await createLedgerEntry(
+      {
+        companyId: input.companyId,
+        siteId: ledgerConfig.siteId,
+        walletType: ledgerConfig.walletType,
+        direction: ledgerConfig.direction,
+        movementType: ledgerConfig.movementType,
+        amount: new Prisma.Decimal(input.amountPaid),
+        idempotencyKey:
+          input.idempotencyKey ?? `investor-${input.kind.toLowerCase()}:${transaction.id}:${Date.now()}`,
+        postedAt: input.paymentDate ? new Date(input.paymentDate) : undefined,
+        note: input.note ?? getDefaultLedgerNote(input.kind),
+        investorTransactionId: transaction.id,
+      },
+      tx,
+    )
+  }
+
+  await syncInvestorClosedState(input.investor.id, tx)
+
+  return transaction.id
+}
+
+export async function addPrincipalForUser(
+  investorId: string,
+  userId: string,
+  data: { amount: number; note?: string; amountPaid?: number; paymentDate?: string; idempotencyKey?: string },
+): Promise<
+  | { transaction: InvestorTransactionView; investor: InvestorView }
+  | InvestorServiceError
+  | null
+> {
+  const { company, investor } = await getInvestorForUser(investorId, userId)
+  if (!company || !investor) return null
+
+  const { amount, note, amountPaid = 0, paymentDate, idempotencyKey } = data
+  if (amountPaid > amount) return { error: 'AMOUNT_EXCEEDS_LIMIT', status: 400 }
+
+  const transactionId = await prisma.$transaction(
+    async (tx) => {
+      return createInvestorTransactionDocumentWithLedger(tx, {
+        companyId: company.id,
+        investor,
+        kind: 'PRINCIPAL_IN',
+        amount,
+        amountPaid,
+        note,
+        paymentDate,
+        idempotencyKey,
+      })
+    },
+    LEDGER_TX_OPTIONS,
+  )
+
+  await invalidateInvestorCaches(company.id, investor.siteId)
+  await invalidateInvestorDetailCaches(investor.id)
+
+  const [view, transaction] = await Promise.all([getInvestorView(investor.id), getTransactionView(transactionId)])
+  if (!view || !transaction) return null
+
+  return {
+    transaction,
+    investor: view.investor,
+  }
+}
+
+export async function returnInvestmentForUser(
+  investorId: string,
+  userId: string,
+  data: { amount: number; note?: string; amountPaid?: number; paymentDate?: string; idempotencyKey?: string },
+): Promise<
+  | { transaction: InvestorTransactionView; investor: InvestorView }
+  | InvestorServiceError
+  | null
+> {
+  const { company, investor } = await getInvestorForUser(investorId, userId)
+  if (!company || !investor) return null
+
+  const { amount, note, amountPaid = 0, paymentDate, idempotencyKey } = data
+  if (amountPaid > amount) return { error: 'AMOUNT_EXCEEDS_LIMIT', status: 400 }
+
+  const summary = await getInvestorLedgerSummary(investor.id)
+  if (amount > summary.outstandingPrincipal) {
+    return {
+      error: `Return amount (${amount}) exceeds outstanding principal (${summary.outstandingPrincipal})`,
+      status: 400,
+    }
+  }
+
+  const transactionId = await prisma.$transaction(
+    async (tx) => {
+      return createInvestorTransactionDocumentWithLedger(tx, {
+        companyId: company.id,
+        investor,
+        kind: 'PRINCIPAL_OUT',
+        amount,
+        amountPaid,
+        note: note ?? 'Principal return',
+        paymentDate,
+        idempotencyKey,
+      })
+    },
+    LEDGER_TX_OPTIONS,
+  )
+
+  await invalidateInvestorCaches(company.id, investor.siteId)
+  await invalidateInvestorDetailCaches(investor.id)
+
+  const [view, transaction] = await Promise.all([getInvestorView(investor.id), getTransactionView(transactionId)])
+  if (!view || !transaction) return null
+
+  return {
+    transaction,
+    investor: view.investor,
+  }
+}
+
+export async function payInterestForUser(
+  investorId: string,
+  userId: string,
+  data: { amount: number; note?: string; amountPaid?: number; paymentDate?: string; idempotencyKey?: string },
+): Promise<
+  | { transaction: InvestorTransactionView; investor: InvestorView }
+  | InvestorServiceError
+  | null
+> {
+  const { company, investor } = await getInvestorForUser(investorId, userId)
+  if (!company || !investor) return null
+
+  if (investor.type !== 'FIXED_RATE') {
+    return { error: 'Interest payments are only for fixed-rate investors', status: 400 }
+  }
+
+  const { amount, note, amountPaid = 0, paymentDate, idempotencyKey } = data
+  if (amountPaid > amount) return { error: 'AMOUNT_EXCEEDS_LIMIT', status: 400 }
+
+  const transactionId = await prisma.$transaction(
+    async (tx) => {
+      return createInvestorTransactionDocumentWithLedger(tx, {
+        companyId: company.id,
+        investor,
+        kind: 'INTEREST',
+        amount,
+        amountPaid,
+        note: note ?? 'Interest payment',
+        paymentDate,
+        idempotencyKey,
+      })
+    },
+    LEDGER_TX_OPTIONS,
+  )
+
+  await invalidateInvestorCaches(company.id, investor.siteId)
+  await invalidateInvestorDetailCaches(investor.id)
+
+  const [view, transaction] = await Promise.all([getInvestorView(investor.id), getTransactionView(transactionId)])
+  if (!view || !transaction) return null
+
+  return {
+    transaction,
+    investor: view.investor,
+  }
+}
+
+export async function getTransactionsForUser(investorId: string, userId: string) {
+  const { investor } = await getInvestorForUser(investorId, userId)
+  if (!investor) return null
+
+  const cacheKey = CacheKeys.investorTransactions(investorId)
+  const cached = await cacheService.get<any>(cacheKey)
+  if (cached) return cached
+
+  const view = await getInvestorView(investorId)
+  if (!view) return null
+
+  const responseData = {
+    transactions: view.transactions,
+    totalInvested: view.investor.totalInvested,
+    totalReturned: view.investor.totalReturned,
+    interestPaid: view.investor.interestPaid,
+    outstandingPrincipal: view.investor.outstandingPrincipal,
+  }
+
+  await cacheService.set(cacheKey, responseData, CacheTTL.ENTITY_LIST)
+  return responseData
+}
+
+export async function updateTransactionPaymentForUser(
+  investorId: string,
+  transactionId: string,
+  userId: string,
+  data: { amount: number; note?: string; idempotencyKey?: string },
+): Promise<
+  | {
+      transaction: {
+        id: string
+        kind: InvestorTransactionKind
+        amountPaid: number
+        remaining: number
+        paymentStatus: 'PENDING' | 'PARTIAL' | 'COMPLETED'
+      }
+      payment: { id: string; amount: number; createdAt: Date }
+    }
+  | InvestorServiceError
+  | null
+> {
+  const { investor, company } = await getInvestorForUser(investorId, userId)
+  if (!investor || !company) return null
+
+  const transaction = await prisma.investorTransaction.findFirst({
+    where: { id: transactionId, investorId: investor.id, isDeleted: false },
+  })
+  if (!transaction) return { error: 'Transaction not found', status: 404 }
+
+  const currentPaid = await getInvestorTransactionPaidTotal(transactionId)
+  const newTotal = currentPaid + data.amount
+  if (newTotal > transaction.amount) return { error: 'AMOUNT_EXCEEDS_LIMIT', status: 400 }
+
+  const ledgerConfig = resolveLedgerConfig(investor, transaction.kind)
+
+  const result = await prisma.$transaction(
+    async (tx) => {
+      const payment = await createLedgerEntry(
+        {
+          companyId: company.id,
+          siteId: ledgerConfig.siteId,
+          walletType: ledgerConfig.walletType,
+          direction: ledgerConfig.direction,
+          movementType: ledgerConfig.movementType,
+          amount: new Prisma.Decimal(data.amount),
+          idempotencyKey: data.idempotencyKey ?? `investor-payment:${transactionId}:${Date.now()}`,
+          note: data.note ?? getDefaultLedgerNote(transaction.kind),
+          investorTransactionId: transactionId,
+        },
+        tx,
+      )
+
+      await syncInvestorClosedState(investor.id, tx)
+
+      const amountPaid = await getInvestorTransactionPaidTotal(transactionId, tx)
+      const remaining = await getInvestorTransactionRemaining(transactionId, tx)
+      const paymentStatus = deriveInvestorTransactionPaymentStatus(transaction.amount, amountPaid)
+
+      return { payment, amountPaid, remaining, paymentStatus }
+    },
+    LEDGER_TX_OPTIONS,
+  )
+
+  await invalidateInvestorCaches(company.id, investor.siteId)
+  await invalidateInvestorDetailCaches(investor.id)
+
+  return {
+    transaction: {
+      id: transaction.id,
+      kind: transaction.kind,
+      amountPaid: result.amountPaid,
+      remaining: result.remaining,
+      paymentStatus: result.paymentStatus,
+    },
+    payment: {
+      id: result.payment.id,
+      amount: Number(result.payment.amount),
+      createdAt: result.payment.postedAt,
+    },
+  }
+}
+
+export async function getTransactionPaymentsForUser(
+  investorId: string,
+  transactionId: string,
+  userId: string,
+): Promise<{ payments: Array<{ id: string; amount: number; note: string | null; createdAt: Date }> } | InvestorServiceError | null> {
+  const { investor, company } = await getInvestorForUser(investorId, userId)
+  if (!investor || !company) return null
+
+  const transaction = await prisma.investorTransaction.findFirst({
+    where: { id: transactionId, investorId: investor.id, isDeleted: false },
+  })
+  if (!transaction) return { error: 'Transaction not found', status: 404 }
+
+  const payments = await prisma.payment.findMany({
+    where: {
+      companyId: company.id,
+      investorTransactionId: transactionId,
+    },
+    orderBy: { postedAt: 'desc' },
+  })
+
+  return {
+    payments: payments.map((payment) => ({
+      id: payment.id,
+      amount: Number(payment.amount),
+      note: payment.note,
+      createdAt: payment.postedAt,
+    })),
+  }
+}

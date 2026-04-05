@@ -1,6 +1,5 @@
 generator client {
   provider      = "prisma-client-js"
-  output        = "../node_modules/.prisma/client"
   binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
@@ -15,11 +14,29 @@ model User {
   passwordHash        String
   firstName           String?
   lastName            String?
+  refreshToken        String?
   passwordResetToken  String?
   passwordResetExpiry DateTime?
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
   company             Company?
+}
+
+model VerificationCode {
+  id        String           @id @default(cuid())
+  email     String
+  code      String
+  type      VerificationType
+  payload   Json?            @db.JsonB
+  expiresAt DateTime
+  createdAt DateTime         @default(now())
+
+  @@unique([email, type])
+}
+
+enum VerificationType {
+  SIGNUP
+  PASSWORD_RESET
 }
 
 model Company {

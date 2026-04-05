@@ -10,6 +10,7 @@ export async function invalidatePartnerCaches(companyId: string) {
     cacheService.del(CacheKeys.companyTotalFund(companyId)),
     cacheService.del(CacheKeys.companyAvailableFund(companyId)),
     cacheService.del(CacheKeys.companyDetails(companyId)),
+    cacheService.delByPattern(`${CacheKeys.activityFeed(companyId)}:*`),
   ])
 }
 
@@ -57,6 +58,7 @@ export async function invalidateCustomerCaches(companyId: string, siteId: string
     cacheService.del(CacheKeys.siteCustomers(siteId)),
     cacheService.delByPattern(`${CacheKeys.customerList(companyId)}:*`),
     cacheService.delByPattern(`${CacheKeys.siteList(companyId)}:*`),
+    cacheService.delByPattern(`${CacheKeys.activityFeed(companyId)}:*`),
   ])
 }
 
