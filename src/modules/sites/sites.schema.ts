@@ -12,7 +12,16 @@ export const createFloorSchema = z.object({
   floorName: z.string().min(1),
 })
 
+export const updateFloorSchema = z.object({
+  floorName: z.string().min(1),
+})
+
 export const createFlatSchema = z.object({
+  customFlatId: z.string().min(1),
+  flatType: z.enum(['CUSTOMER', 'EXISTING_OWNER']).optional().default('CUSTOMER'),
+})
+
+export const updateFlatDetailsSchema = z.object({
   customFlatId: z.string().min(1),
   flatType: z.enum(['CUSTOMER', 'EXISTING_OWNER']).optional().default('CUSTOMER'),
 })

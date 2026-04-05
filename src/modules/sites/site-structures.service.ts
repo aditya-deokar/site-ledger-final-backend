@@ -5,6 +5,21 @@ import { cacheService } from '../../services/cache.service.js'
 import { CacheKeys, CacheTTL } from '../../config/cache-keys.js'
 import { getSiteForUser } from './site-access.service.js'
 
+async function syncSiteStructureCounts(siteId: string) {
+  const [floorCount, flatCount] = await Promise.all([
+    prisma.floor.count({ where: { siteId } }),
+    prisma.flat.count({ where: { siteId } }),
+  ])
+
+  await prisma.site.update({
+    where: { id: siteId },
+    data: {
+      totalFloors: floorCount,
+      totalFlats: flatCount,
+    },
+  })
+}
+
 export async function createFloorForUser(siteId: string, userId: string, floorName: string) {
   const { company, site } = await getSiteForUser(siteId, userId)
   if (!company || !site) return null
@@ -159,5 +174,161 @@ export async function updateFlatForUser(
     data: { status },
   })
 
+  await cacheService.del(CacheKeys.siteFloors(site.id))
+  await cacheService.del(CacheKeys.siteDetail(site.id))
+  await invalidateSiteListCaches(site.companyId)
+
   return updated
+}
+
+export async function updateFloorForUser(
+  siteId: string,
+  floorId: string,
+  userId: string,
+  data: { floorName: string },
+) {
+  const { company, site } = await getSiteForUser(siteId, userId)
+  if (!company || !site) return null
+
+  const floor = await prisma.floor.findFirst({
+    where: { id: floorId, siteId: site.id },
+  })
+  if (!floor) return { error: 'Floor not found', status: 404 as const }
+
+  const updated = await prisma.floor.update({
+    where: { id: floor.id },
+    data: { floorName: data.floorName },
+  })
+
+  await cacheService.del(CacheKeys.siteFloors(site.id))
+  await cacheService.del(CacheKeys.siteDetail(site.id))
+  await invalidateSiteListCaches(company.id)
+
+  return updated
+}
+
+export async function deleteFloorForUser(siteId: string, floorId: string, userId: string) {
+  const { company, site } = await getSiteForUser(siteId, userId)
+  if (!company || !site) return null
+
+  const floor = await prisma.floor.findFirst({
+    where: { id: floorId, siteId: site.id },
+    include: {
+      _count: {
+        select: { flats: true },
+      },
+    },
+  })
+  if (!floor) return { error: 'Floor not found', status: 404 as const }
+
+  if (floor._count.flats > 0) {
+    return {
+      error: 'Cannot delete this floor because it still contains flats',
+      status: 400 as const,
+    }
+  }
+
+  await prisma.floor.delete({
+    where: { id: floor.id },
+  })
+
+  await syncSiteStructureCounts(site.id)
+  await cacheService.del(CacheKeys.siteFloors(site.id))
+  await cacheService.del(CacheKeys.siteDetail(site.id))
+  await invalidateSiteListCaches(company.id)
+
+  return { id: floor.id }
+}
+
+export async function updateFlatDetailsForUser(
+  siteId: string,
+  flatId: string,
+  userId: string,
+  data: { customFlatId: string; flatType?: 'CUSTOMER' | 'EXISTING_OWNER' },
+) {
+  const { company, site } = await getSiteForUser(siteId, userId)
+  if (!company || !site) return null
+
+  const flat = await prisma.flat.findFirst({
+    where: { id: flatId, siteId: site.id },
+    include: {
+      customer: {
+        select: { id: true },
+      },
+    },
+  })
+  if (!flat) return { error: 'Flat not found', status: 404 as const }
+
+  if (flat.customer || flat.status !== 'AVAILABLE') {
+    return {
+      error: 'Cannot edit this flat because only available, unassigned flats can be modified',
+      status: 400 as const,
+    }
+  }
+
+  const existing = await prisma.flat.findFirst({
+    where: {
+      siteId: site.id,
+      customFlatId: data.customFlatId,
+      id: { not: flat.id },
+    },
+  })
+  if (existing) return { error: 'Flat ID already exists in this site', status: 400 as const }
+
+  const requestedFlatType = data.flatType ?? 'CUSTOMER'
+  const flatType = site.projectType === 'NEW_CONSTRUCTION' ? 'CUSTOMER' : requestedFlatType
+
+  const updated = await prisma.flat.update({
+    where: { id: flat.id },
+    data: {
+      customFlatId: data.customFlatId,
+      flatType,
+    },
+  })
+
+  await cacheService.del(CacheKeys.siteFloors(site.id))
+  await cacheService.del(CacheKeys.siteDetail(site.id))
+  await invalidateSiteListCaches(company.id)
+
+  return updated
+}
+
+export async function deleteFlatForUser(siteId: string, flatId: string, userId: string) {
+  const { company, site } = await getSiteForUser(siteId, userId)
+  if (!company || !site) return null
+
+  const flat = await prisma.flat.findFirst({
+    where: { id: flatId, siteId: site.id },
+    include: {
+      customer: {
+        select: { id: true },
+      },
+    },
+  })
+  if (!flat) return { error: 'Flat not found', status: 404 as const }
+
+  if (flat.customer) {
+    return {
+      error: 'Cannot delete this flat because it is linked to an existing customer',
+      status: 400 as const,
+    }
+  }
+
+  if (flat.status !== 'AVAILABLE') {
+    return {
+      error: 'Cannot delete this flat because only available, unassigned flats can be removed',
+      status: 400 as const,
+    }
+  }
+
+  await prisma.flat.delete({
+    where: { id: flat.id },
+  })
+
+  await syncSiteStructureCounts(site.id)
+  await cacheService.del(CacheKeys.siteFloors(site.id))
+  await cacheService.del(CacheKeys.siteDetail(site.id))
+  await invalidateSiteListCaches(company.id)
+
+  return { id: flat.id }
 }
