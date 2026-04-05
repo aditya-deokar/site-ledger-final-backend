@@ -2,7 +2,7 @@ node_modules
 dist
 .env
 .prisma
-/prisma/migrations
+# /prisma/migrations (Keeping migrations in git is best practice)
 /.vscode
 .DS_Store
 .idea
@@ -11,5 +11,5 @@ dist
 *.env.test
 *.env.production
 
-# Ignore the features doc
+# Ignore the features
 features.md

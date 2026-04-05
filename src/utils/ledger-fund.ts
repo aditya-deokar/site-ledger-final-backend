@@ -1,51 +1,84 @@
 import { prisma } from '../db/prisma.js'
 import { cacheService } from '../services/cache.service.js'
+import { getCompanyBalance, getSiteBalance } from '../services/ledger-read.service.js'
 import { CacheKeys, CacheTTL } from '../config/cache-keys.js'
 
-// ── Company Fund Helpers ──────────────────────────────
+async function getLedgerWalletBalance(
+  where: Parameters<typeof prisma.payment.aggregate>[0]['where'],
+): Promise<number> {
+  const [incoming, outgoing] = await Promise.all([
+    prisma.payment.aggregate({
+      where: { ...where, direction: 'IN' },
+      _sum: { amount: true },
+    }),
+    prisma.payment.aggregate({
+      where: { ...where, direction: 'OUT' },
+      _sum: { amount: true },
+    }),
+  ])
+
+  return Number(incoming._sum.amount ?? 0) - Number(outgoing._sum.amount ?? 0)
+}
 
 export async function getCompanyPartnerFund(companyId: string): Promise<number> {
   const cached = await cacheService.get<number>(CacheKeys.companyPartnerFund(companyId))
   if (cached !== null) return cached
 
-  const result = await prisma.partner.aggregate({
-    where: { companyId },
-    _sum: { investmentAmount: true },
+  const value = await getLedgerWalletBalance({
+    companyId,
+    walletType: 'COMPANY',
+    partnerId: { not: null },
   })
-  const value = result._sum?.investmentAmount ?? 0
   await cacheService.set(CacheKeys.companyPartnerFund(companyId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }
 
-// Fixed-rate investor principal (what they invested, not reduced by interest)
 export async function getCompanyFixedRateInvestorFund(companyId: string): Promise<number> {
   const cached = await cacheService.get<number>(CacheKeys.companyInvestorFund(companyId))
   if (cached !== null) return cached
 
-  const result = await prisma.investor.aggregate({
-    where: { companyId, type: 'FIXED_RATE', isDeleted: false },
-    _sum: { totalInvested: true },
+  const result = await prisma.payment.aggregate({
+    where: {
+      companyId,
+      walletType: 'COMPANY',
+      direction: 'IN',
+      investorTransaction: {
+        investor: { companyId, type: 'FIXED_RATE', isDeleted: false },
+        isDeleted: false,
+        kind: 'PRINCIPAL_IN',
+      },
+    },
+    _sum: { amount: true },
   })
-  const value = result._sum.totalInvested ?? 0
+
+  const value = Number(result._sum.amount ?? 0)
   await cacheService.set(CacheKeys.companyInvestorFund(companyId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }
 
-// Total money returned to fixed-rate investors (interest + principal returns)
 export async function getCompanyFixedRateReturned(companyId: string): Promise<number> {
   const cached = await cacheService.get<number>(CacheKeys.companyFixedRateReturned(companyId))
   if (cached !== null) return cached
 
-  const result = await prisma.investor.aggregate({
-    where: { companyId, type: 'FIXED_RATE', isDeleted: false },
-    _sum: { totalReturned: true },
+  const result = await prisma.payment.aggregate({
+    where: {
+      companyId,
+      walletType: 'COMPANY',
+      direction: 'OUT',
+      investorTransaction: {
+        investor: { companyId, type: 'FIXED_RATE', isDeleted: false },
+        isDeleted: false,
+        kind: { in: ['PRINCIPAL_OUT', 'INTEREST'] },
+      },
+    },
+    _sum: { amount: true },
   })
-  const value = result._sum.totalReturned ?? 0
+
+  const value = Number(result._sum.amount ?? 0)
   await cacheService.set(CacheKeys.companyFixedRateReturned(companyId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }
 
-// Total fund = partner investments + fixed-rate investor principal
 export async function getCompanyTotalFund(companyId: string): Promise<number> {
   const cached = await cacheService.get<number>(CacheKeys.companyTotalFund(companyId))
   if (cached !== null) return cached
@@ -54,101 +87,150 @@ export async function getCompanyTotalFund(companyId: string): Promise<number> {
     getCompanyPartnerFund(companyId),
     getCompanyFixedRateInvestorFund(companyId),
   ])
+
   const value = partnerFund + investorFund
   await cacheService.set(CacheKeys.companyTotalFund(companyId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }
 
-// Partner allocations to sites (site_funds table)
 export async function getTotalAllocatedFund(companyId: string): Promise<number> {
   const cached = await cacheService.get<number>(CacheKeys.companyAllocated(companyId))
   if (cached !== null) return cached
 
-  const result = await prisma.siteFund.aggregate({
-    where: { site: { companyId } },
-    _sum: { amount: true },
-  })
-  const value = result._sum?.amount ?? 0
+  const [allocatedOut, returnedIn] = await Promise.all([
+    prisma.payment.aggregate({
+      where: {
+        companyId,
+        walletType: 'COMPANY',
+        direction: 'OUT',
+        movementType: 'COMPANY_TO_SITE_TRANSFER',
+      },
+      _sum: { amount: true },
+    }),
+    prisma.payment.aggregate({
+      where: {
+        companyId,
+        walletType: 'COMPANY',
+        direction: 'IN',
+        movementType: 'SITE_TO_COMPANY_TRANSFER',
+      },
+      _sum: { amount: true },
+    }),
+  ])
+
+  const value = Number(allocatedOut._sum.amount ?? 0) - Number(returnedIn._sum.amount ?? 0)
   await cacheService.set(CacheKeys.companyAllocated(companyId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }
 
-// Total company withdrawals (owner payouts, operational expenses)
 export async function getCompanyTotalWithdrawals(companyId: string): Promise<number> {
   const cached = await cacheService.get<number>(CacheKeys.companyWithdrawals(companyId))
   if (cached !== null) return cached
 
-  const result = await prisma.companyWithdrawal.aggregate({
-    where: { companyId, isDeleted: false },
+  const result = await prisma.payment.aggregate({
+    where: {
+      companyId,
+      walletType: 'COMPANY',
+      direction: 'OUT',
+      companyWithdrawal: {
+        companyId,
+        isDeleted: false,
+      },
+    },
     _sum: { amount: true },
   })
-  const value = result._sum.amount ?? 0
+
+  const value = Number(result._sum.amount ?? 0)
   await cacheService.set(CacheKeys.companyWithdrawals(companyId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }
 
-// available = (partner fund + fixed-rate invested - fixed-rate returned) - site allocations - withdrawals
-export async function getCompanyAvailableFund(companyId: string): Promise<number> {
+export async function getCompanyLedgerBalance(companyId: string): Promise<number> {
   const cached = await cacheService.get<number>(CacheKeys.companyAvailableFund(companyId))
   if (cached !== null) return cached
 
-  const [partnerFund, investorFund, investorReturned, allocated, withdrawn] = await Promise.all([
-    getCompanyPartnerFund(companyId),
-    getCompanyFixedRateInvestorFund(companyId),
-    getCompanyFixedRateReturned(companyId),
-    getTotalAllocatedFund(companyId),
-    getCompanyTotalWithdrawals(companyId),
-  ])
-  const value = partnerFund + investorFund - investorReturned - allocated - withdrawn
+  const value = await getCompanyBalance(companyId)
+
   await cacheService.set(CacheKeys.companyAvailableFund(companyId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }
 
-// ── Site Fund Helpers ─────────────────────────────────
+export async function getCompanyAvailableFund(companyId: string): Promise<number> {
+  return getCompanyLedgerBalance(companyId)
+}
 
-// Partner allocations to this specific site (only positive entries = money in)
 export async function getSitePartnerAllocatedFund(siteId: string): Promise<number> {
   const cached = await cacheService.get<number>(CacheKeys.sitePartnerAllocated(siteId))
   if (cached !== null) return cached
 
-  const result = await prisma.siteFund.aggregate({
-    where: { siteId, amount: { gt: 0 } },
-    _sum: { amount: true },
-  })
-  const value = result._sum.amount ?? 0
+  const [incoming, outgoing] = await Promise.all([
+    prisma.payment.aggregate({
+      where: {
+        siteId,
+        walletType: 'SITE',
+        direction: 'IN',
+        movementType: 'COMPANY_TO_SITE_TRANSFER',
+      },
+      _sum: { amount: true },
+    }),
+    prisma.payment.aggregate({
+      where: {
+        siteId,
+        walletType: 'SITE',
+        direction: 'OUT',
+        movementType: 'SITE_TO_COMPANY_TRANSFER',
+      },
+      _sum: { amount: true },
+    }),
+  ])
+
+  const value = Number(incoming._sum.amount ?? 0) - Number(outgoing._sum.amount ?? 0)
   await cacheService.set(CacheKeys.sitePartnerAllocated(siteId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }
 
-// Fund pulled back from site to company (negative SiteFund entries)
 export async function getSiteWithdrawnFund(siteId: string): Promise<number> {
   const cached = await cacheService.get<number>(CacheKeys.siteWithdrawn(siteId))
   if (cached !== null) return cached
 
-  const result = await prisma.siteFund.aggregate({
-    where: { siteId, amount: { lt: 0 } },
+  const result = await prisma.payment.aggregate({
+    where: {
+      siteId,
+      walletType: 'SITE',
+      direction: 'OUT',
+      movementType: 'SITE_TO_COMPANY_TRANSFER',
+    },
     _sum: { amount: true },
   })
-  const value = Math.abs(result._sum.amount ?? 0)
+
+  const value = Number(result._sum.amount ?? 0)
   await cacheService.set(CacheKeys.siteWithdrawn(siteId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }
 
-// Equity investor principal invested in this site (not reduced by profit returns)
 export async function getSiteEquityInvestorFund(siteId: string): Promise<number> {
   const cached = await cacheService.get<number>(CacheKeys.siteEquityInvestorFund(siteId))
   if (cached !== null) return cached
 
-  const result = await prisma.investor.aggregate({
-    where: { siteId, type: 'EQUITY', isDeleted: false },
-    _sum: { totalInvested: true },
+  const result = await prisma.payment.aggregate({
+    where: {
+      siteId,
+      walletType: 'SITE',
+      direction: 'IN',
+      investorTransaction: {
+        investor: { siteId, type: 'EQUITY', isDeleted: false },
+        isDeleted: false,
+        kind: 'PRINCIPAL_IN',
+      },
+    },
+    _sum: { amount: true },
   })
-  const value = result._sum.totalInvested ?? 0
+
+  const value = Number(result._sum.amount ?? 0)
   await cacheService.set(CacheKeys.siteEquityInvestorFund(siteId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }
 
-// Total allocated = partner allocations + equity investor money
 export async function getSiteAllocatedFund(siteId: string): Promise<number> {
   const cached = await cacheService.get<number>(CacheKeys.siteAllocated(siteId))
   if (cached !== null) return cached
@@ -157,31 +239,37 @@ export async function getSiteAllocatedFund(siteId: string): Promise<number> {
     getSitePartnerAllocatedFund(siteId),
     getSiteEquityInvestorFund(siteId),
   ])
+
   const value = partnerFund + investorFund
   await cacheService.set(CacheKeys.siteAllocated(siteId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }
 
-// Actual cash spent on expenses (for remaining fund calculation)
 export async function getSiteTotalExpenses(siteId: string): Promise<number> {
   const cached = await cacheService.get<number>(CacheKeys.siteExpenses(siteId))
   if (cached !== null) return cached
 
-  const result = await prisma.expense.aggregate({
-    where: { siteId, isDeleted: false },
-    _sum: { amountPaid: true },
+  const result = await prisma.payment.aggregate({
+    where: {
+      siteId,
+      walletType: 'SITE',
+      direction: 'OUT',
+      expense: { siteId, isDeleted: false },
+    },
+    _sum: { amount: true },
   })
-  const value = result._sum.amountPaid ?? 0
+
+  const value = Number(result._sum.amount ?? 0)
   await cacheService.set(CacheKeys.siteExpenses(siteId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }
 
-// Total billed amount (for display — what's been invoiced)
 export async function getSiteTotalExpensesBilled(siteId: string): Promise<number> {
   const result = await prisma.expense.aggregate({
     where: { siteId, isDeleted: false },
     _sum: { amount: true },
   })
+
   return result._sum.amount ?? 0
 }
 
@@ -189,41 +277,54 @@ export async function getSiteCustomerPayments(siteId: string): Promise<number> {
   const cached = await cacheService.get<number>(CacheKeys.siteCustomerPayments(siteId))
   if (cached !== null) return cached
 
-  const result = await prisma.customer.aggregate({
-    where: { siteId, isDeleted: false },
-    _sum: { amountPaid: true },
+  const result = await prisma.payment.aggregate({
+    where: {
+      siteId,
+      walletType: 'SITE',
+      direction: 'IN',
+      customer: { siteId, isDeleted: false },
+    },
+    _sum: { amount: true },
   })
-  const value = result._sum.amountPaid ?? 0
+
+  const value = Number(result._sum.amount ?? 0)
   await cacheService.set(CacheKeys.siteCustomerPayments(siteId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }
 
-// Total money returned to equity investors for this site (profit payouts)
 export async function getSiteEquityReturned(siteId: string): Promise<number> {
   const cached = await cacheService.get<number>(CacheKeys.siteEquityReturned(siteId))
   if (cached !== null) return cached
 
-  const result = await prisma.investor.aggregate({
-    where: { siteId, type: 'EQUITY', isDeleted: false },
-    _sum: { totalReturned: true },
+  const result = await prisma.payment.aggregate({
+    where: {
+      siteId,
+      walletType: 'SITE',
+      direction: 'OUT',
+      investorTransaction: {
+        investor: { siteId, type: 'EQUITY', isDeleted: false },
+        isDeleted: false,
+        kind: { in: ['PRINCIPAL_OUT', 'INTEREST'] },
+      },
+    },
+    _sum: { amount: true },
   })
-  const value = result._sum.totalReturned ?? 0
+
+  const value = Number(result._sum.amount ?? 0)
   await cacheService.set(CacheKeys.siteEquityReturned(siteId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }
 
-export async function getSiteRemainingFund(siteId: string): Promise<number> {
+export async function getSiteLedgerBalance(siteId: string): Promise<number> {
   const cached = await cacheService.get<number>(CacheKeys.siteRemaining(siteId))
   if (cached !== null) return cached
 
-  const [allocated, withdrawn, expenses, customerPayments, equityReturned] = await Promise.all([
-    getSiteAllocatedFund(siteId),
-    getSiteWithdrawnFund(siteId),
-    getSiteTotalExpenses(siteId),
-    getSiteCustomerPayments(siteId),
-    getSiteEquityReturned(siteId),
-  ])
-  const value = allocated - withdrawn - expenses + customerPayments - equityReturned
+  const value = await getSiteBalance(siteId)
+
   await cacheService.set(CacheKeys.siteRemaining(siteId), value, CacheTTL.FUND_CALCULATIONS)
   return value
+}
+
+export async function getSiteRemainingFund(siteId: string): Promise<number> {
+  return getSiteLedgerBalance(siteId)
 }

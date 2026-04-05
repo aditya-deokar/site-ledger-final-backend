@@ -10,6 +10,7 @@ import { siteRoutes } from './routes/sites.js'
 import { vendorRoutes } from './routes/vendors.js'
 import { customerRoutes } from './routes/customers.js'
 import { investorRoutes } from './routes/investors.js'
+import { LedgerError } from './services/ledger.service.js'
 import { jsonError } from './utils/response.js'
 import { requestId } from './middlewares/request-id.js'
 import { createLogger } from './config/logger.js'
@@ -37,14 +38,27 @@ const pinoLogger = createMiddleware(async (c, next) => {
 
 export const app = new OpenAPIHono()
 
-app.use('*', requestId)
-app.use('*', pinoLogger)
 app.use('*', cors({
-  origin: ['http://localhost:3000', 'http://localhost:5173'],
+  origin: (origin) => {
+    const allowed = [
+      'http://localhost:3000',
+      'http://localhost:5173',
+      'https://www.sitesledger.app',
+      'https://sitesledger.app',
+      'https://www.siteledger.app',
+      'https://siteledger.app',
+    ]
+    return allowed.includes(origin) ? origin : null
+  },
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization'],
+  allowHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With'],
+  exposeHeaders: ['Content-Length', 'X-Request-ID'],
+  maxAge: 600,
   credentials: true,
 }))
+
+app.use('*', requestId)
+app.use('*', pinoLogger)
 
 app.doc('/openapi.json', {
   openapi: '3.0.0',
@@ -94,5 +108,15 @@ app.route('/api/investors', investorRoutes)
 app.notFound((c: Context) => jsonError(c, 'Not Found', 404))
 
 app.onError((err: Error, c: Context) => {
+  if (err instanceof LedgerError) {
+    const status = err.code === 'IDEMPOTENCY_CONFLICT'
+      ? 409
+      : err.code === 'INSUFFICIENT_FUNDS' || err.code === 'AMOUNT_EXCEEDS_LIMIT' || err.code === 'INVALID_LEDGER_INPUT'
+        ? 400
+        : 500
+
+    return jsonError(c, err.code, status)
+  }
+
   return jsonError(c, err.message || 'Internal Server Error', 500)
 })
