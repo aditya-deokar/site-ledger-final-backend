@@ -268,8 +268,31 @@ async function validateDocumentLimit(
     assertLedger(Boolean(customer), 'INVALID_LEDGER_INPUT')
     assertLedger(customer!.siteId === input.siteId, 'INVALID_LEDGER_INPUT')
 
-    const paidTotal = await getDocumentPaidTotal('customerId', input.customerId, tx)
-    assertLedger(paidTotal.plus(input.amount).lessThanOrEqualTo(customer!.sellingPrice), 'AMOUNT_EXCEEDS_LIMIT')
+    const [incomingResult, outgoingResult] = await Promise.all([
+      tx.payment.aggregate({
+        where: {
+          customerId: input.customerId,
+          direction: 'IN',
+        },
+        _sum: { amount: true },
+      }),
+      tx.payment.aggregate({
+        where: {
+          customerId: input.customerId,
+          direction: 'OUT',
+        },
+        _sum: { amount: true },
+      }),
+    ])
+
+    const netPaid = getNormalizedAmount(incomingResult._sum.amount).minus(getNormalizedAmount(outgoingResult._sum.amount))
+
+    if (input.movementType === 'CUSTOMER_REFUND') {
+      assertLedger(netPaid.minus(input.amount).greaterThanOrEqualTo(0), 'AMOUNT_EXCEEDS_LIMIT')
+      return
+    }
+
+    assertLedger(netPaid.plus(input.amount).lessThanOrEqualTo(customer!.sellingPrice), 'AMOUNT_EXCEEDS_LIMIT')
     return
   }
 

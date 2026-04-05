@@ -87,7 +87,7 @@ export function summarizeVendorRecords(expenses: VendorExpenseRecord[]) {
   }
 }
 
-export function mapVendorBill(expense: VendorExpenseRecord) {
+function mapVendorBill(expense: VendorExpenseRecord) {
   const ledgerEntries = [...expense.ledgerEntries].sort(
     (left, right) => right.postedAt.getTime() - left.postedAt.getTime(),
   )
