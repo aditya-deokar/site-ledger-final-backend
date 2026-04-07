@@ -14,6 +14,7 @@ import {
 } from '../constants/auth.constants.js'
 import { requireJwt } from '../middlewares/jwt.js'
 import { jsonError, jsonOk } from '../utils/response.js'
+import { getPasswordValidationMessage } from '../utils/password-policy.js'
 import { randomBytes } from 'crypto'
 
 import { VerificationService } from '../services/verification.service.js'
@@ -21,16 +22,24 @@ import { VerificationType } from '@prisma/client'
 
 export const authRoutes = new OpenAPIHono<{ Variables: AuthContext['Variables'] }>()
 
+const getValidationErrorMessage = (error: z.ZodError<unknown>, fallback = 'Invalid request body') =>
+  error.issues[0]?.message || fallback
+
 const signUpSchema = z.object({
   email: z.string().regex(EMAIL_VALIDATION_REGEX, 'Invalid email format'),
-  password: z.string().min(8),
-  firstName: z.string().min(1).optional(),
-  lastName: z.string().min(1).optional(),
+  password: z.string().min(1, 'Password is required.'),
+  firstName: z.string().optional(),
+  lastName: z.string().optional(),
 })
 
 const signInSchema = z.object({
   email: z.string().regex(EMAIL_VALIDATION_REGEX, 'Invalid email format'),
-  password: z.string().min(8),
+  password: z.string().min(1, 'Password is required.'),
+})
+
+const resetPasswordBodySchema = z.object({
+  token: z.string().min(1, 'Reset token is required.'),
+  newPassword: z.string().min(1, 'Password is required.'),
 })
 
 const signUpResponseSchema = z.object({
@@ -102,10 +111,17 @@ authRoutes.openapi(signUpRoute, async (c) => {
   const parsed = signUpSchema.safeParse(body)
 
   if (!parsed.success) {
-    return jsonError(c, 'Invalid request body', 400) as any
+    return jsonError(c, getValidationErrorMessage(parsed.error), 400) as any
   }
 
-  const { email, password, firstName, lastName } = parsed.data
+  const { email, password } = parsed.data
+  const firstName = parsed.data.firstName?.trim() || undefined
+  const lastName = parsed.data.lastName?.trim() || undefined
+  const passwordError = getPasswordValidationMessage(password)
+
+  if (passwordError) {
+    return jsonError(c, passwordError, 400) as any
+  }
 
   try {
     const existing = await prisma.user.findUnique({
@@ -126,9 +142,8 @@ authRoutes.openapi(signUpRoute, async (c) => {
     })
 
     return jsonOk(c, { message: 'A 6-digit verification code has been sent to your email.' }) as any
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Failed to initiate signup'
-    return jsonError(c, message, 500) as any
+  } catch {
+    return jsonError(c, 'Failed to initiate signup', 500) as any
   }
 })
 
@@ -173,7 +188,7 @@ authRoutes.openapi(verifySignUpRoute, async (c) => {
   const parsed = verifySignUpSchema.safeParse(body)
 
   if (!parsed.success) {
-    return jsonError(c, 'Invalid verification code', 400) as any
+    return jsonError(c, getValidationErrorMessage(parsed.error, 'Invalid verification code'), 400) as any
   }
 
   const { email, code } = parsed.data
@@ -230,9 +245,8 @@ authRoutes.openapi(verifySignUpRoute, async (c) => {
       },
       201,
     ) as any
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Failed to verify signup'
-    return jsonError(c, message, 500) as any
+  } catch {
+    return jsonError(c, 'Failed to verify signup', 500) as any
   }
 })
 
@@ -295,7 +309,7 @@ authRoutes.openapi(signInRoute, async (c) => {
   const parsed = signInSchema.safeParse(body)
 
   if (!parsed.success) {
-    return jsonError(c, 'Invalid request body', 400) as any
+    return jsonError(c, getValidationErrorMessage(parsed.error), 400) as any
   }
 
   const user = await prisma.user.findUnique({
@@ -381,7 +395,7 @@ authRoutes.openapi(refreshRoute, async (c) => {
   const parsed = z.object({ refreshToken: z.string() }).safeParse(body)
 
   if (!parsed.success) {
-    return jsonError(c, 'Refresh token required', 400) as any
+    return jsonError(c, getValidationErrorMessage(parsed.error, 'Refresh token required'), 400) as any
   }
 
   try {
@@ -540,7 +554,7 @@ const forgotPasswordRoute = createRoute({
 authRoutes.openapi(forgotPasswordRoute, async (c) => {
   const body = await c.req.json().catch(() => null)
   const parsed = z.object({ email: z.string().email() }).safeParse(body)
-  if (!parsed.success) return jsonError(c, 'Invalid request body', 400) as any
+  if (!parsed.success) return jsonError(c, getValidationErrorMessage(parsed.error), 400) as any
 
   const user = await prisma.user.findUnique({ where: { email: parsed.data.email } })
   if (!user) return jsonError(c, 'No account found with that email', 404) as any
@@ -607,7 +621,7 @@ authRoutes.openapi(verifyResetCodeRoute, async (c) => {
     code: z.string().length(VERIFICATION_CODE_LENGTH),
   }).safeParse(body)
 
-  if (!parsed.success) return jsonError(c, 'Invalid request body', 400) as any
+  if (!parsed.success) return jsonError(c, getValidationErrorMessage(parsed.error), 400) as any
 
   const { email, code } = parsed.data
 
@@ -650,10 +664,7 @@ const resetPasswordRoute = createRoute({
     body: {
       content: {
         'application/json': {
-          schema: z.object({
-            token: z.string().min(1),
-            newPassword: z.string().min(8),
-          }),
+          schema: resetPasswordBodySchema,
         },
       },
     },
@@ -679,10 +690,15 @@ const resetPasswordRoute = createRoute({
 
 authRoutes.openapi(resetPasswordRoute, async (c) => {
   const body = await c.req.json().catch(() => null)
-  const parsed = z.object({ token: z.string().min(1), newPassword: z.string().min(8) }).safeParse(body)
-  if (!parsed.success) return jsonError(c, 'Invalid request body', 400) as any
+  const parsed = resetPasswordBodySchema.safeParse(body)
+  if (!parsed.success) return jsonError(c, getValidationErrorMessage(parsed.error), 400) as any
 
   const { token, newPassword } = parsed.data
+  const passwordError = getPasswordValidationMessage(newPassword)
+
+  if (passwordError) {
+    return jsonError(c, passwordError, 400) as any
+  }
 
   const user = await prisma.user.findFirst({
     where: {
