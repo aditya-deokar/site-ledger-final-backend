@@ -153,16 +153,15 @@ async function getWalletBalance(
         walletType: 'SITE',
       }
 
-  const [incoming, outgoing] = await Promise.all([
-    tx.payment.aggregate({
-      where: { ...where, direction: 'IN' },
-      _sum: { amount: true },
-    }),
-    tx.payment.aggregate({
-      where: { ...where, direction: 'OUT' },
-      _sum: { amount: true },
-    }),
-  ])
+  // Interactive Prisma transactions are sensitive to parallel queries on the same tx client.
+  const incoming = await tx.payment.aggregate({
+    where: { ...where, direction: 'IN' },
+    _sum: { amount: true },
+  })
+  const outgoing = await tx.payment.aggregate({
+    where: { ...where, direction: 'OUT' },
+    _sum: { amount: true },
+  })
 
   return getNormalizedAmount(incoming._sum.amount).minus(getNormalizedAmount(outgoing._sum.amount))
 }
@@ -268,22 +267,20 @@ async function validateDocumentLimit(
     assertLedger(Boolean(customer), 'INVALID_LEDGER_INPUT')
     assertLedger(customer!.siteId === input.siteId, 'INVALID_LEDGER_INPUT')
 
-    const [incomingResult, outgoingResult] = await Promise.all([
-      tx.payment.aggregate({
-        where: {
-          customerId: input.customerId,
-          direction: 'IN',
-        },
-        _sum: { amount: true },
-      }),
-      tx.payment.aggregate({
-        where: {
-          customerId: input.customerId,
-          direction: 'OUT',
-        },
-        _sum: { amount: true },
-      }),
-    ])
+    const incomingResult = await tx.payment.aggregate({
+      where: {
+        customerId: input.customerId,
+        direction: 'IN',
+      },
+      _sum: { amount: true },
+    })
+    const outgoingResult = await tx.payment.aggregate({
+      where: {
+        customerId: input.customerId,
+        direction: 'OUT',
+      },
+      _sum: { amount: true },
+    })
 
     const netPaid = getNormalizedAmount(incomingResult._sum.amount).minus(getNormalizedAmount(outgoingResult._sum.amount))
 

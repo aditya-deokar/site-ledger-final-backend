@@ -2,7 +2,8 @@ import { Prisma } from '@prisma/client'
 import { prisma } from '../../db/prisma.js'
 import { getCompanyForUser } from '../../shared/access/company-access.js'
 import { getCustomerPaidTotal, getCustomerRemaining } from '../../services/customer-ledger.service.js'
-import { createLedgerEntry } from '../../services/ledger.service.js'
+import { createLedgerEntry, LedgerError } from '../../services/ledger.service.js'
+import { getSiteBalance } from '../../services/ledger-read.service.js'
 import { invalidateCustomerCaches } from '../../services/cache-invalidation.js'
 import { cacheService } from '../../services/cache.service.js'
 import { CacheKeys, CacheTTL } from '../../config/cache-keys.js'
@@ -19,6 +20,28 @@ import {
 export type CustomerServiceError = {
   error: string
   status: number
+  availableFund?: number
+  refundAmount?: number
+  shortfall?: number
+}
+
+type BookingSuccessResult = {
+  customer: {
+    id: string
+    name: string
+    phone: string | null
+    email: string | null
+    sellingPrice: number
+    bookingAmount: number
+    customerType: string
+    flatId: string | null
+    createdAt: Date
+  }
+  flatNumber: number | null
+  floorNumber: number
+  flatStatus: 'BOOKED' | 'SOLD'
+  amountPaid: number
+  remaining: number
 }
 
 export function isCustomerServiceError(result: unknown): result is CustomerServiceError {
@@ -30,6 +53,24 @@ export function isCustomerServiceError(result: unknown): result is CustomerServi
     'status' in result &&
     typeof result.status === 'number'
   )
+}
+
+function normalizeCurrencyAmount(value: number) {
+  return Number(value.toFixed(2))
+}
+
+async function buildCancelBookingInsufficientFundsError(siteId: string, refundAmount: number): Promise<CustomerServiceError> {
+  const availableFund = normalizeCurrencyAmount(await getSiteBalance(siteId))
+  const normalizedRefundAmount = normalizeCurrencyAmount(refundAmount)
+  const shortfall = normalizeCurrencyAmount(Math.max(0, normalizedRefundAmount - availableFund))
+
+  return {
+    error: 'INSUFFICIENT_FUNDS',
+    status: 400,
+    availableFund,
+    refundAmount: normalizedRefundAmount,
+    shortfall,
+  }
 }
 
 export async function getAllCustomersForUser(userId: string, status?: 'BOOKED' | 'SOLD') {
@@ -157,19 +198,21 @@ export async function bookFlatForUser(
 
   if (isCustomerServiceError(result)) return result
 
+  const bookingResult = result as BookingSuccessResult
+
   await invalidateCustomerCaches(company.id, siteId)
   await cacheService.del(CacheKeys.flatCustomer(flatId))
 
   const customerType =
-    result.customer.customerType === 'CUSTOMER' || result.customer.customerType === 'EXISTING_OWNER'
-      ? result.customer.customerType
+    bookingResult.customer.customerType === 'CUSTOMER' || bookingResult.customer.customerType === 'EXISTING_OWNER'
+      ? bookingResult.customer.customerType
       : null
 
   return {
     customer: mapBookingCustomerResponse({
-      ...result,
+      ...bookingResult,
       customer: {
-        ...result.customer,
+        ...bookingResult.customer,
         customerType,
       },
     }),
@@ -282,35 +325,51 @@ export async function cancelBookingForUser(siteId: string, flatId: string, custo
   })
   if (!existing) return { error: 'Customer not found', status: 404 }
 
-  await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-    const amountPaid = await getCustomerPaidTotal(customerId, tx)
-
-    if (amountPaid > 0) {
-      await createLedgerEntry(
-        {
-          companyId: company.id,
-          siteId: site.id,
-          walletType: 'SITE',
-          direction: 'OUT',
-          movementType: 'CUSTOMER_REFUND',
-          amount: new Prisma.Decimal(amountPaid),
-          idempotencyKey: `customer-cancel:${customerId}:refund`,
-          note: 'Booking cancelled refund',
-          customerId,
-        },
-        tx,
-      )
+  const refundAmount = await getCustomerPaidTotal(customerId)
+  if (refundAmount > 0) {
+    const availableFund = await getSiteBalance(site.id)
+    if (refundAmount > availableFund) {
+      return buildCancelBookingInsufficientFundsError(site.id, refundAmount)
     }
+  }
 
-    await tx.customer.update({
-      where: { id: customerId },
-      data: { isDeleted: true, flatId: null },
+  const transactionResult = await prisma
+    .$transaction(async (tx: Prisma.TransactionClient) => {
+      if (refundAmount > 0) {
+        await createLedgerEntry(
+          {
+            companyId: company.id,
+            siteId: site.id,
+            walletType: 'SITE',
+            direction: 'OUT',
+            movementType: 'CUSTOMER_REFUND',
+            amount: new Prisma.Decimal(refundAmount),
+            idempotencyKey: `customer-cancel:${customerId}:refund`,
+            note: 'Booking cancelled refund',
+            customerId,
+          },
+          tx,
+        )
+      }
+
+      await tx.customer.update({
+        where: { id: customerId },
+        data: { isDeleted: true, flatId: null },
+      })
+      await tx.flat.update({
+        where: { id: flatId },
+        data: { status: 'AVAILABLE' },
+      })
+    }, LEDGER_TX_OPTIONS)
+    .catch(async (err: unknown) => {
+      if (err instanceof LedgerError && err.code === 'INSUFFICIENT_FUNDS') {
+        return buildCancelBookingInsufficientFundsError(site.id, refundAmount)
+      }
+
+      throw err
     })
-    await tx.flat.update({
-      where: { id: flatId },
-      data: { status: 'AVAILABLE' },
-    })
-  })
+
+  if (isCustomerServiceError(transactionResult)) return transactionResult
 
   await invalidateCustomerCaches(company.id, siteId)
   await cacheService.del(CacheKeys.flatCustomer(flatId))

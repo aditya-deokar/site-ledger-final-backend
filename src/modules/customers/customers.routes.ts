@@ -6,6 +6,7 @@ import {
   createCustomerSchema,
   customerResponseSchema,
   errorResponseSchema,
+  insufficientFundsErrorResponseSchema,
   updateCustomerSchema,
 } from './customers.schema.js'
 import {
@@ -284,6 +285,10 @@ const cancelBookingRoute = createRoute({
       },
       description: 'Booking cancelled',
     },
+    400: {
+      content: { 'application/json': { schema: insufficientFundsErrorResponseSchema } },
+      description: 'Insufficient site funds to refund the customer',
+    },
     404: {
       content: { 'application/json': { schema: errorResponseSchema } },
       description: 'Customer not found',
@@ -296,7 +301,22 @@ customerRoutes.openapi(cancelBookingRoute, async (c) => {
   const { siteId, flatId, id } = c.req.valid('param')
 
   const result = await cancelBookingForUser(siteId, flatId, id, auth.userId)
-  if (isCustomerServiceError(result)) return jsonError(c, result.error, result.status) as any
+  if (isCustomerServiceError(result)) {
+    if (result.error === 'INSUFFICIENT_FUNDS') {
+      return c.json(
+        {
+          ok: false,
+          error: result.error,
+          availableFund: result.availableFund,
+          refundAmount: result.refundAmount,
+          shortfall: result.shortfall,
+        },
+        result.status as any,
+      )
+    }
+
+    return jsonError(c, result.error, result.status) as any
+  }
 
   return jsonOk(c, result) as any
 })
