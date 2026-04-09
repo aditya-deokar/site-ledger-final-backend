@@ -138,11 +138,13 @@ export async function getFloorsForUser(siteId: string, userId: string) {
                 id: flat.customer.id,
                 name: flat.customer.name,
                 phone: flat.customer.phone,
+                email: flat.customer.email,
                 sellingPrice: flat.customer.sellingPrice,
                 bookingAmount: flat.customer.bookingAmount,
                 amountPaid,
                 remaining: flat.customer.sellingPrice - amountPaid,
                 customerType: flat.customer.customerType,
+                createdAt: flat.customer.createdAt.toISOString(),
               }
             })()
           : null,
