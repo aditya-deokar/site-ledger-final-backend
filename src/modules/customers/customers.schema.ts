@@ -51,3 +51,9 @@ export const errorResponseSchema = z.object({
   ok: z.literal(false),
   error: z.string(),
 })
+
+export const insufficientFundsErrorResponseSchema = errorResponseSchema.extend({
+  availableFund: z.number().optional(),
+  refundAmount: z.number().optional(),
+  shortfall: z.number().optional(),
+})
