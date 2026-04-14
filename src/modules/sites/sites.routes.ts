@@ -3,6 +3,7 @@ import type { AuthContext } from '../../types/auth.js'
 import { requireJwt } from '../../middlewares/jwt.js'
 import { jsonError, jsonOk } from '../../utils/response.js'
 import { createSiteSchema, errorResponseSchema } from './sites.schema.js'
+import { siteReportSchema } from './site-report.schema.js'
 import {
   createSiteForUser,
   deleteSiteForUser,
@@ -10,6 +11,7 @@ import {
   getSitesForUser,
   toggleSiteForUser,
 } from './sites.service.js'
+import { getSiteReportForUser } from './site-report.service.js'
 import { registerSiteFundRoutes } from './site-funds.routes.js'
 import { registerSiteExpenseRoutes } from './site-expenses.routes.js'
 import { registerSiteStructureRoutes } from './site-structures.routes.js'
@@ -217,6 +219,48 @@ siteRoutes.openapi(getSiteRoute, async (c) => {
   if (!responseData) return jsonError(c, 'Site not found', 404) as any
 
   return jsonOk(c, responseData) as any
+})
+
+const getSiteReportRoute = createRoute({
+  method: 'get',
+  path: '/{id}/report',
+  tags: ['Sites'],
+  summary: 'Get complete site report',
+  description:
+    'Returns a consolidated site report snapshot with overview, financials, inventory, customer bookings, expenses, investors, fund history, and recent activity.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: {
+      content: {
+        'application/json': {
+          schema: z.object({
+            ok: z.literal(true),
+            data: z.object({
+              report: siteReportSchema,
+            }),
+          }),
+        },
+      },
+      description: 'Complete site report',
+    },
+    404: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: 'Site not found',
+    },
+  },
+})
+
+siteRoutes.openapi(getSiteReportRoute, async (c) => {
+  const auth = c.get('auth')
+  const { id } = c.req.valid('param')
+
+  const report = await getSiteReportForUser(id, auth.userId)
+  if (!report) return jsonError(c, 'Site not found', 404) as any
+
+  return jsonOk(c, { report }) as any
 })
 
 const toggleSiteRoute = createRoute({
