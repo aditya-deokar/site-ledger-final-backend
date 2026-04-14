@@ -129,6 +129,7 @@ const getSitesRoute = createRoute({
                   totalExpenses: z.number(),
                   customerPayments: z.number(),
                   remainingFund: z.number(),
+                  totalProfit: z.number(),
                   createdAt: z.string().datetime(),
                 }),
               ),
