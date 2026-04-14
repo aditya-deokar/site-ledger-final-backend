@@ -261,13 +261,6 @@ export async function updateFlatDetailsForUser(
   })
   if (!flat) return { error: 'Flat not found', status: 404 as const }
 
-  if (flat.customer || flat.status !== 'AVAILABLE') {
-    return {
-      error: 'Cannot edit this flat because only available, unassigned flats can be modified',
-      status: 400 as const,
-    }
-  }
-
   const existing = await prisma.flat.findFirst({
     where: {
       siteId: site.id,
@@ -277,8 +270,13 @@ export async function updateFlatDetailsForUser(
   })
   if (existing) return { error: 'Flat ID already exists in this site', status: 400 as const }
 
-  const requestedFlatType = data.flatType ?? 'CUSTOMER'
-  const flatType = site.projectType === 'NEW_CONSTRUCTION' ? 'CUSTOMER' : requestedFlatType
+  const canChangeFlatType = !flat.customer && flat.status === 'AVAILABLE'
+  const requestedFlatType = data.flatType ?? flat.flatType ?? 'CUSTOMER'
+  const flatType = canChangeFlatType
+    ? site.projectType === 'NEW_CONSTRUCTION'
+      ? 'CUSTOMER'
+      : requestedFlatType
+    : flat.flatType
 
   const updated = await prisma.flat.update({
     where: { id: flat.id },

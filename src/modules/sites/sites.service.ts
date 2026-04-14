@@ -22,10 +22,6 @@ function distributeFlatsAcrossFloors(totalFloors: number, totalFlats: number) {
   return Array.from({ length: totalFloors }, (_, index) => baseFlatCount + (index < remainder ? 1 : 0))
 }
 
-function buildAutoFlatId(floorNumber: number, flatNumber: number) {
-  return `F${String(floorNumber).padStart(2, '0')}-${String(flatNumber).padStart(2, '0')}`
-}
-
 export async function createSiteForUser(
   userId: string,
   data: {
@@ -75,7 +71,7 @@ export async function createSiteForUser(
             siteId: createdSite.id,
             floorId: createdFloor.id,
             flatNumber,
-            customFlatId: buildAutoFlatId(floorNumber, flatNumber),
+            customFlatId: null,
             flatType: 'CUSTOMER',
             status: 'AVAILABLE',
           },
