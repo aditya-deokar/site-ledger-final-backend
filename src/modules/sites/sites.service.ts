@@ -13,25 +13,77 @@ import { invalidateSiteListCaches } from '../../services/cache-invalidation.js'
 import { cacheService } from '../../services/cache.service.js'
 import { CacheKeys, CacheTTL } from '../../config/cache-keys.js'
 
+function distributeFlatsAcrossFloors(totalFloors: number, totalFlats: number) {
+  if (totalFloors <= 0) return []
+
+  const baseFlatCount = Math.floor(totalFlats / totalFloors)
+  const remainder = totalFlats % totalFloors
+
+  return Array.from({ length: totalFloors }, (_, index) => baseFlatCount + (index < remainder ? 1 : 0))
+}
+
+function buildAutoFlatId(floorNumber: number, flatNumber: number) {
+  return `F${String(floorNumber).padStart(2, '0')}-${String(flatNumber).padStart(2, '0')}`
+}
+
 export async function createSiteForUser(
   userId: string,
-  data: { name: string; address: string; projectType: 'NEW_CONSTRUCTION' | 'REDEVELOPMENT' },
+  data: {
+    name: string
+    address: string
+    projectType: 'NEW_CONSTRUCTION' | 'REDEVELOPMENT'
+    totalFloors?: number
+    totalFlats?: number
+  },
 ) {
   const company = await getCompanyForUser(userId)
   if (!company) return null
 
   const slug = await generateUniqueSlug(data.name)
+  const totalFloors = data.totalFloors ?? 0
+  const totalFlats = data.totalFlats ?? 0
+  const flatDistribution = distributeFlatsAcrossFloors(totalFloors, totalFlats)
 
-  const site = await prisma.site.create({
-    data: {
-      companyId: company.id,
-      name: data.name,
-      address: data.address,
-      projectType: data.projectType,
-      slug,
-      totalFloors: 0,
-      totalFlats: 0,
-    },
+  const site = await prisma.$transaction(async (tx) => {
+    const createdSite = await tx.site.create({
+      data: {
+        companyId: company.id,
+        name: data.name,
+        address: data.address,
+        projectType: data.projectType,
+        slug,
+        totalFloors,
+        totalFlats,
+      },
+    })
+
+    for (let floorIndex = 0; floorIndex < totalFloors; floorIndex += 1) {
+      const floorNumber = floorIndex + 1
+      const createdFloor = await tx.floor.create({
+        data: {
+          siteId: createdSite.id,
+          floorNumber,
+          floorName: null,
+        },
+      })
+
+      const flatsForFloor = flatDistribution[floorIndex] ?? 0
+      for (let flatIndex = 0; flatIndex < flatsForFloor; flatIndex += 1) {
+        const flatNumber = flatIndex + 1
+        await tx.flat.create({
+          data: {
+            siteId: createdSite.id,
+            floorId: createdFloor.id,
+            flatNumber,
+            customFlatId: buildAutoFlatId(floorNumber, flatNumber),
+            flatType: 'CUSTOMER',
+            status: 'AVAILABLE',
+          },
+        })
+      }
+    }
+
+    return createdSite
   })
 
   await invalidateSiteListCaches(company.id)
