@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto'
+
 import { prisma } from '../../db/prisma.js'
 import { generateUniqueSlug } from '../../utils/slug.js'
 import {
@@ -22,6 +24,17 @@ function distributeFlatsAcrossFloors(totalFloors: number, totalFlats: number) {
   return Array.from({ length: totalFloors }, (_, index) => baseFlatCount + (index < remainder ? 1 : 0))
 }
 
+function chunkItems<T>(items: T[], chunkSize: number) {
+  if (!items.length) return []
+
+  const chunks: T[][] = []
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize))
+  }
+
+  return chunks
+}
+
 export async function createSiteForUser(
   userId: string,
   data: {
@@ -39,10 +52,32 @@ export async function createSiteForUser(
   const totalFloors = data.totalFloors ?? 0
   const totalFlats = data.totalFlats ?? 0
   const flatDistribution = distributeFlatsAcrossFloors(totalFloors, totalFlats)
+  const siteId = randomUUID()
+  const floorRecords = Array.from({ length: totalFloors }, (_, floorIndex) => ({
+    id: randomUUID(),
+    siteId,
+    floorNumber: floorIndex + 1,
+    floorName: null as string | null,
+  }))
+  const flatRecords = floorRecords.flatMap((floor, floorIndex) => {
+    const flatsForFloor = flatDistribution[floorIndex] ?? 0
 
-  const site = await prisma.$transaction(async (tx) => {
-    const createdSite = await tx.site.create({
+    return Array.from({ length: flatsForFloor }, (_, flatIndex) => ({
+      id: randomUUID(),
+      siteId,
+      floorId: floor.id,
+      flatNumber: flatIndex + 1,
+      customFlatId: null as string | null,
+      flatType: 'CUSTOMER' as const,
+      status: 'AVAILABLE' as const,
+    }))
+  })
+  const flatBatches = chunkItems(flatRecords, 5000)
+
+  await prisma.$transaction([
+    prisma.site.create({
       data: {
+        id: siteId,
         companyId: company.id,
         name: data.name,
         address: data.address,
@@ -51,35 +86,23 @@ export async function createSiteForUser(
         totalFloors,
         totalFlats,
       },
-    })
+    }),
+    ...(floorRecords.length
+      ? [
+          prisma.floor.createMany({
+            data: floorRecords,
+          }),
+        ]
+      : []),
+    ...flatBatches.map((batch) =>
+      prisma.flat.createMany({
+        data: batch,
+      }),
+    ),
+  ])
 
-    for (let floorIndex = 0; floorIndex < totalFloors; floorIndex += 1) {
-      const floorNumber = floorIndex + 1
-      const createdFloor = await tx.floor.create({
-        data: {
-          siteId: createdSite.id,
-          floorNumber,
-          floorName: null,
-        },
-      })
-
-      const flatsForFloor = flatDistribution[floorIndex] ?? 0
-      for (let flatIndex = 0; flatIndex < flatsForFloor; flatIndex += 1) {
-        const flatNumber = flatIndex + 1
-        await tx.flat.create({
-          data: {
-            siteId: createdSite.id,
-            floorId: createdFloor.id,
-            flatNumber,
-            customFlatId: null,
-            flatType: 'CUSTOMER',
-            status: 'AVAILABLE',
-          },
-        })
-      }
-    }
-
-    return createdSite
+  const site = await prisma.site.findUniqueOrThrow({
+    where: { id: siteId },
   })
 
   await invalidateSiteListCaches(company.id)
