@@ -6,6 +6,14 @@ export const createSiteSchema = z.object({
   projectType: z.enum(['NEW_CONSTRUCTION', 'REDEVELOPMENT']).optional().default('NEW_CONSTRUCTION'),
   totalFloors: z.number().int().min(1).optional(),
   totalFlats: z.number().int().min(1).optional(),
+}).superRefine((data, ctx) => {
+  if (data.totalFlats && !data.totalFloors) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['totalFloors'],
+      message: 'At least one floor is required before creating flats.',
+    })
+  }
 })
 
 export const createFloorSchema = z.object({

@@ -395,7 +395,7 @@ export function registerSiteStructureRoutes(siteRoutes: SiteRouteApp) {
     path: '/{id}/flats/{flatId}',
     tags: ['Floors & Flats'],
     summary: 'Update flat details',
-    description: 'Update the flat ID and flat type for an available, unassigned flat.',
+    description: 'Update a flat unit ID. Flat type can only be changed while the unit is still available and unassigned.',
     security: [{ bearerAuth: [] }],
     request: {
       params: z.object({ id: z.string(), flatId: z.string() }),

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto'
+
 import { prisma } from '../../db/prisma.js'
 import { generateUniqueSlug } from '../../utils/slug.js'
 import {
@@ -13,25 +15,94 @@ import { invalidateSiteListCaches } from '../../services/cache-invalidation.js'
 import { cacheService } from '../../services/cache.service.js'
 import { CacheKeys, CacheTTL } from '../../config/cache-keys.js'
 
+function distributeFlatsAcrossFloors(totalFloors: number, totalFlats: number) {
+  if (totalFloors <= 0) return []
+
+  const baseFlatCount = Math.floor(totalFlats / totalFloors)
+  const remainder = totalFlats % totalFloors
+
+  return Array.from({ length: totalFloors }, (_, index) => baseFlatCount + (index < remainder ? 1 : 0))
+}
+
+function chunkItems<T>(items: T[], chunkSize: number) {
+  if (!items.length) return []
+
+  const chunks: T[][] = []
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize))
+  }
+
+  return chunks
+}
+
 export async function createSiteForUser(
   userId: string,
-  data: { name: string; address: string; projectType: 'NEW_CONSTRUCTION' | 'REDEVELOPMENT' },
+  data: {
+    name: string
+    address: string
+    projectType: 'NEW_CONSTRUCTION' | 'REDEVELOPMENT'
+    totalFloors?: number
+    totalFlats?: number
+  },
 ) {
   const company = await getCompanyForUser(userId)
   if (!company) return null
 
   const slug = await generateUniqueSlug(data.name)
+  const totalFloors = data.totalFloors ?? 0
+  const totalFlats = data.totalFlats ?? 0
+  const flatDistribution = distributeFlatsAcrossFloors(totalFloors, totalFlats)
+  const siteId = randomUUID()
+  const floorRecords = Array.from({ length: totalFloors }, (_, floorIndex) => ({
+    id: randomUUID(),
+    siteId,
+    floorNumber: floorIndex + 1,
+    floorName: null as string | null,
+  }))
+  const flatRecords = floorRecords.flatMap((floor, floorIndex) => {
+    const flatsForFloor = flatDistribution[floorIndex] ?? 0
 
-  const site = await prisma.site.create({
-    data: {
-      companyId: company.id,
-      name: data.name,
-      address: data.address,
-      projectType: data.projectType,
-      slug,
-      totalFloors: 0,
-      totalFlats: 0,
-    },
+    return Array.from({ length: flatsForFloor }, (_, flatIndex) => ({
+      id: randomUUID(),
+      siteId,
+      floorId: floor.id,
+      flatNumber: flatIndex + 1,
+      customFlatId: null as string | null,
+      flatType: 'CUSTOMER' as const,
+      status: 'AVAILABLE' as const,
+    }))
+  })
+  const flatBatches = chunkItems(flatRecords, 5000)
+
+  await prisma.$transaction([
+    prisma.site.create({
+      data: {
+        id: siteId,
+        companyId: company.id,
+        name: data.name,
+        address: data.address,
+        projectType: data.projectType,
+        slug,
+        totalFloors,
+        totalFlats,
+      },
+    }),
+    ...(floorRecords.length
+      ? [
+          prisma.floor.createMany({
+            data: floorRecords,
+          }),
+        ]
+      : []),
+    ...flatBatches.map((batch) =>
+      prisma.flat.createMany({
+        data: batch,
+      }),
+    ),
+  ])
+
+  const site = await prisma.site.findUniqueOrThrow({
+    where: { id: siteId },
   })
 
   await invalidateSiteListCaches(company.id)
@@ -64,15 +135,22 @@ export async function getSitesForUser(userId: string, showArchived?: 'true' | 'f
 
   const siteSummaries = await Promise.all(
     sites.map(async (site) => {
-      const [partnerAllocatedFund, investorAllocatedFund, totalExpenses, customerPayments, remainingFund] = await Promise.all([
+      const [partnerAllocatedFund, investorAllocatedFund, totalExpenses, totalExpensesBilled, customerPayments, remainingFund, totalRevenueResult] = await Promise.all([
         getSitePartnerAllocatedFund(site.id),
         getSiteEquityInvestorFund(site.id),
         getSiteTotalExpenses(site.id),
+        getSiteTotalExpensesBilled(site.id),
         getSiteCustomerPayments(site.id),
         getSiteRemainingFund(site.id),
+        prisma.customer.aggregate({
+          where: { siteId: site.id, isDeleted: false },
+          _sum: { sellingPrice: true },
+        }),
       ])
 
       const allocatedFund = partnerAllocatedFund + investorAllocatedFund
+      const totalRevenue = totalRevenueResult._sum.sellingPrice ?? 0
+      const totalProfit = totalRevenue - totalExpensesBilled
       const flatsSummary = { available: 0, booked: 0, sold: 0 }
       for (const floor of site.floors) {
         for (const flat of floor.flats) {
@@ -97,6 +175,7 @@ export async function getSitesForUser(userId: string, showArchived?: 'true' | 'f
         totalExpenses,
         customerPayments,
         remainingFund,
+        totalProfit,
         flatsSummary,
         createdAt: site.createdAt,
       }
