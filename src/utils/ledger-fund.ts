@@ -97,28 +97,17 @@ export async function getTotalAllocatedFund(companyId: string): Promise<number> 
   const cached = await cacheService.get<number>(CacheKeys.companyAllocated(companyId))
   if (cached !== null) return cached
 
-  const [allocatedOut, returnedIn] = await Promise.all([
-    prisma.payment.aggregate({
-      where: {
-        companyId,
-        walletType: 'COMPANY',
-        direction: 'OUT',
-        movementType: 'COMPANY_TO_SITE_TRANSFER',
-      },
-      _sum: { amount: true },
-    }),
-    prisma.payment.aggregate({
-      where: {
-        companyId,
-        walletType: 'COMPANY',
-        direction: 'IN',
-        movementType: 'SITE_TO_COMPANY_TRANSFER',
-      },
-      _sum: { amount: true },
-    }),
-  ])
+  const allocatedOut = await prisma.payment.aggregate({
+    where: {
+      companyId,
+      walletType: 'COMPANY',
+      direction: 'OUT',
+      movementType: 'COMPANY_TO_SITE_TRANSFER',
+    },
+    _sum: { amount: true },
+  })
 
-  const value = Number(allocatedOut._sum.amount ?? 0) - Number(returnedIn._sum.amount ?? 0)
+  const value = Number(allocatedOut._sum.amount ?? 0)
   await cacheService.set(CacheKeys.companyAllocated(companyId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }
@@ -163,28 +152,17 @@ export async function getSitePartnerAllocatedFund(siteId: string): Promise<numbe
   const cached = await cacheService.get<number>(CacheKeys.sitePartnerAllocated(siteId))
   if (cached !== null) return cached
 
-  const [incoming, outgoing] = await Promise.all([
-    prisma.payment.aggregate({
-      where: {
-        siteId,
-        walletType: 'SITE',
-        direction: 'IN',
-        movementType: 'COMPANY_TO_SITE_TRANSFER',
-      },
-      _sum: { amount: true },
-    }),
-    prisma.payment.aggregate({
-      where: {
-        siteId,
-        walletType: 'SITE',
-        direction: 'OUT',
-        movementType: 'SITE_TO_COMPANY_TRANSFER',
-      },
-      _sum: { amount: true },
-    }),
-  ])
+  const incoming = await prisma.payment.aggregate({
+    where: {
+      siteId,
+      walletType: 'SITE',
+      direction: 'IN',
+      movementType: 'COMPANY_TO_SITE_TRANSFER',
+    },
+    _sum: { amount: true },
+  })
 
-  const value = Number(incoming._sum.amount ?? 0) - Number(outgoing._sum.amount ?? 0)
+  const value = Number(incoming._sum.amount ?? 0)
   await cacheService.set(CacheKeys.sitePartnerAllocated(siteId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }
