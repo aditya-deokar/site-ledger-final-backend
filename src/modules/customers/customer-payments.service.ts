@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client'
 import { prisma } from '../../db/prisma.js'
-import { getCustomerPaidTotal, getCustomerRemaining } from '../../services/customer-ledger.service.js'
+import { getCustomerPaidTotal, getCustomerRemaining, sumDirectionalLedgerAmounts } from '../../services/customer-ledger.service.js'
 import { createLedgerEntry } from '../../services/ledger.service.js'
 import { invalidateCustomerCaches } from '../../services/cache-invalidation.js'
 import { cacheService } from '../../services/cache.service.js'
@@ -19,12 +19,12 @@ export async function recordCustomerPaymentForUser(
   if (!customer) return { error: 'Customer not found', status: 404 }
 
   const customerWithLedger = await prisma.customer.findFirst({
-    where: { id: customerId, companyId: company.id, isDeleted: false },
-    include: { ledgerEntries: { select: { amount: true } } },
+    where: { id: customerId, companyId: company.id, isDeleted: false, dealStatus: 'ACTIVE' },
+    include: { ledgerEntries: { select: { amount: true, direction: true } } },
   })
   if (!customerWithLedger) return { error: 'Customer not found', status: 404 }
 
-  const currentPaid = customerWithLedger.ledgerEntries.reduce((sum, entry) => sum + Number(entry.amount), 0)
+  const currentPaid = sumDirectionalLedgerAmounts(customerWithLedger.ledgerEntries)
   const newTotal = currentPaid + data.amount
   if (newTotal > customerWithLedger.sellingPrice) {
     return { error: 'AMOUNT_EXCEEDS_LIMIT', status: 400 }
@@ -77,7 +77,7 @@ export async function recordCustomerPaymentForUser(
 }
 
 export async function getCustomerPaymentsForUser(customerId: string, userId: string) {
-  const { company, customer } = await getCustomerForUser(customerId, userId)
+  const { company, customer } = await getCustomerForUser(customerId, userId, { includeCancelled: true })
   if (!company) return { error: 'Company not found', status: 404 }
   if (!customer) return { error: 'Customer not found', status: 404 }
 

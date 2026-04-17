@@ -153,6 +153,15 @@ model Customer {
   customerType  String    @default("CUSTOMER")
   sellingPrice  Float
   bookingAmount Float
+  dealStatus    CustomerDealStatus @default(ACTIVE)
+  cancelledAt   DateTime?
+  cancellationReason String?
+  cancelledByUserId String?
+  cancelledFromFlatStatus FlatStatus?
+  cancelledFlatId String?
+  cancelledFlatDisplay String?
+  cancelledFloorNumber Int?
+  cancelledFloorName String?
   isDeleted     Boolean   @default(false)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -160,6 +169,9 @@ model Customer {
   company       Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
   flat          Flat?     @relation(fields: [flatId], references: [id])
   site          Site?     @relation(fields: [siteId], references: [id])
+
+  @@index([companyId, dealStatus, createdAt])
+  @@index([siteId, dealStatus, createdAt])
 }
 
 model Investor {
@@ -243,6 +255,11 @@ enum FlatStatus {
   AVAILABLE
   BOOKED
   SOLD
+}
+
+enum CustomerDealStatus {
+  ACTIVE
+  CANCELLED
 }
 
 enum InvestorType {

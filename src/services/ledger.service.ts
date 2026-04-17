@@ -257,6 +257,7 @@ async function validateDocumentLimit(
         id: input.customerId,
         companyId: input.companyId,
         isDeleted: false,
+        dealStatus: 'ACTIVE',
       },
       select: {
         sellingPrice: true,

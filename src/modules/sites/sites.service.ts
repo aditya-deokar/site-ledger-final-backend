@@ -143,7 +143,7 @@ export async function getSitesForUser(userId: string, showArchived?: 'true' | 'f
         getSiteCustomerPayments(site.id),
         getSiteRemainingFund(site.id),
         prisma.customer.aggregate({
-          where: { siteId: site.id, isDeleted: false },
+          where: { siteId: site.id, isDeleted: false, dealStatus: 'ACTIVE' },
           _sum: { sellingPrice: true },
         }),
       ])
@@ -226,7 +226,7 @@ export async function getSiteDetailForUser(siteId: string, userId: string) {
     prisma.flat.count({ where: { siteId: site.id, flatType: 'CUSTOMER' } }),
     prisma.flat.count({ where: { siteId: site.id, flatType: 'EXISTING_OWNER' } }),
     prisma.customer.aggregate({
-      where: { siteId: site.id, isDeleted: false },
+      where: { siteId: site.id, isDeleted: false, dealStatus: 'ACTIVE' },
       _sum: { sellingPrice: true },
     }),
   ])

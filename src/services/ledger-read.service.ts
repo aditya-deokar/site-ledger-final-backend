@@ -45,6 +45,18 @@ async function getPaymentTotal(
   return Number(result._sum.amount ?? 0)
 }
 
+async function getDirectionalPaymentTotal(
+  where: Prisma.PaymentWhereInput,
+  db: LedgerReadDb,
+): Promise<number> {
+  const [incoming, outgoing] = await Promise.all([
+    getPaymentTotal({ ...where, direction: 'IN' }, db),
+    getPaymentTotal({ ...where, direction: 'OUT' }, db),
+  ])
+
+  return incoming - outgoing
+}
+
 async function getWalletBalance(
   where: Prisma.PaymentWhereInput,
   db: LedgerReadDb,
@@ -76,7 +88,7 @@ export async function getCustomerPaidTotal(
   tx?: LedgerReadDb,
 ): Promise<number> {
   const db = tx ?? prisma
-  return getPaymentTotal({ customerId }, db)
+  return getDirectionalPaymentTotal({ customerId }, db)
 }
 
 export async function getExpensePaidTotal(
