@@ -12,12 +12,21 @@ export async function verifySiteOwnership(siteId: string, userId: string) {
   return { company, site }
 }
 
-export async function getCustomerForUser(customerId: string, userId: string) {
+export async function getCustomerForUser(
+  customerId: string,
+  userId: string,
+  options?: { includeCancelled?: boolean },
+) {
   const company = await getCompanyForUser(userId)
   if (!company) return { company: null, customer: null }
 
   const customer = await prisma.customer.findFirst({
-    where: { id: customerId, companyId: company.id, isDeleted: false },
+    where: {
+      id: customerId,
+      companyId: company.id,
+      isDeleted: false,
+      ...(options?.includeCancelled ? {} : { dealStatus: 'ACTIVE' }),
+    },
   })
 
   return { company, customer }

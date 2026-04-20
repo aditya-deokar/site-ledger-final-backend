@@ -1,7 +1,7 @@
 import { prisma } from '../db/prisma.js'
-import { getCustomerPaidTotal, sumLedgerAmounts, type LedgerReadDb } from './ledger-read.service.js'
+import { getCustomerPaidTotal, sumDirectionalLedgerAmounts, sumLedgerAmounts, type LedgerReadDb } from './ledger-read.service.js'
 
-export { getCustomerPaidTotal, sumLedgerAmounts } from './ledger-read.service.js'
+export { getCustomerPaidTotal, sumDirectionalLedgerAmounts, sumLedgerAmounts } from './ledger-read.service.js'
 
 export async function getCustomerRemaining(
   customerId: string,

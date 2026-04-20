@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client'
 import { prisma } from '../../db/prisma.js'
 import { getCompanyForUser } from '../../shared/access/company-access.js'
-import { getCustomerPaidTotal, getCustomerRemaining } from '../../services/customer-ledger.service.js'
+import { getCustomerPaidTotal, getCustomerRemaining, sumDirectionalLedgerAmounts } from '../../services/customer-ledger.service.js'
 import { createLedgerEntry, LedgerError } from '../../services/ledger.service.js'
 import { getSiteBalance } from '../../services/ledger-read.service.js'
 import { invalidateCustomerCaches } from '../../services/cache-invalidation.js'
@@ -34,14 +34,22 @@ type BookingSuccessResult = {
     sellingPrice: number
     bookingAmount: number
     customerType: string
+    dealStatus: 'ACTIVE' | 'CANCELLED'
     flatId: string | null
     createdAt: Date
   }
   flatNumber: number | null
+  customFlatId: string | null
   floorNumber: number
+  floorName: string | null
   flatStatus: 'BOOKED' | 'SOLD'
   amountPaid: number
   remaining: number
+}
+
+type CancelDealInput = {
+  reason: string
+  refundAmount: number
 }
 
 export function isCustomerServiceError(result: unknown): result is CustomerServiceError {
@@ -73,6 +81,13 @@ async function buildCancelBookingInsufficientFundsError(siteId: string, refundAm
   }
 }
 
+function getFlatDisplayName(flat: {
+  flatNumber: number | null
+  customFlatId: string | null
+}) {
+  return flat.customFlatId || `Flat ${flat.flatNumber ?? '-'}`
+}
+
 export async function getAllCustomersForUser(userId: string, status?: 'BOOKED' | 'SOLD') {
   const company = await getCompanyForUser(userId)
   if (!company) return { error: 'No company found. Create one first.', status: 404 }
@@ -85,10 +100,11 @@ export async function getAllCustomersForUser(userId: string, status?: 'BOOKED' |
     where: {
       companyId: company.id,
       isDeleted: false,
+      dealStatus: 'ACTIVE',
       ...(status ? { flat: { status } } : {}),
     },
     include: {
-      ledgerEntries: { select: { amount: true } },
+      ledgerEntries: { select: { amount: true, direction: true } },
       flat: { include: { floor: true } },
       site: { select: { id: true, name: true } },
     },
@@ -178,7 +194,9 @@ export async function bookFlatForUser(
         return {
           customer,
           flatNumber: flat.flatNumber,
+          customFlatId: flat.customFlatId,
           floorNumber: flat.floor.floorNumber,
+          floorName: flat.floor.floorName,
           flatStatus: newStatus,
           amountPaid,
           remaining,
@@ -215,6 +233,8 @@ export async function bookFlatForUser(
         ...bookingResult.customer,
         customerType,
       },
+      customFlatId: bookingResult.customFlatId,
+      floorName: bookingResult.floorName,
     }),
   }
 }
@@ -228,9 +248,9 @@ export async function getSiteCustomersForUser(siteId: string, userId: string) {
   if (cached) return cached
 
   const customers = await prisma.customer.findMany({
-    where: { siteId: site.id, isDeleted: false },
+    where: { siteId: site.id, isDeleted: false, dealStatus: 'ACTIVE' },
     include: {
-      ledgerEntries: { select: { amount: true } },
+      ledgerEntries: { select: { amount: true, direction: true } },
       flat: { include: { floor: true } },
     },
     orderBy: { createdAt: 'desc' },
@@ -253,9 +273,9 @@ export async function getFlatCustomerForUser(siteId: string, flatId: string, use
   if (cached) return cached
 
   const customer = await prisma.customer.findFirst({
-    where: { flatId, siteId: site.id, isDeleted: false },
+    where: { flatId, siteId: site.id, isDeleted: false, dealStatus: 'ACTIVE' },
     include: {
-      ledgerEntries: { select: { amount: true } },
+      ledgerEntries: { select: { amount: true, direction: true } },
       flat: { include: { floor: true } },
     },
   })
@@ -280,7 +300,7 @@ export async function updateCustomerForUser(
   if (!site) return { error: 'Site not found', status: 404 }
 
   const existing = await prisma.customer.findFirst({
-    where: { id: customerId, flatId, siteId: site.id },
+    where: { id: customerId, flatId, siteId: site.id, isDeleted: false, dealStatus: 'ACTIVE' },
   })
   if (!existing) return { error: 'Customer not found', status: 404 }
 
@@ -289,12 +309,12 @@ export async function updateCustomerForUser(
       where: { id: customerId },
       data,
       include: {
-        ledgerEntries: { select: { amount: true } },
+        ledgerEntries: { select: { amount: true, direction: true } },
         flat: { include: { floor: true } },
       },
     })
 
-    const amountPaid = customer.ledgerEntries.reduce((sum, entry) => sum + Number(entry.amount), 0)
+    const amountPaid = sumDirectionalLedgerAmounts(customer.ledgerEntries)
 
     let flatStatus = customer.flat!.status
     if (amountPaid >= customer.sellingPrice && flatStatus !== 'SOLD') {
@@ -304,7 +324,19 @@ export async function updateCustomerForUser(
 
     const remaining = await getCustomerRemaining(customer.id, tx)
 
-    return { customer, flatStatus, amountPaid, remaining }
+    return {
+      customer: {
+        ...customer,
+        flat: customer.flat
+          ? {
+              ...customer.flat,
+              status: flatStatus,
+            }
+          : null,
+      },
+      amountPaid,
+      remaining,
+    }
   }, LEDGER_TX_OPTIONS)
 
   const { company } = await verifySiteOwnership(siteId, userId)
@@ -316,16 +348,37 @@ export async function updateCustomerForUser(
   }
 }
 
-export async function cancelBookingForUser(siteId: string, flatId: string, customerId: string, userId: string) {
+export async function cancelDealForUser(
+  siteId: string,
+  flatId: string,
+  customerId: string,
+  userId: string,
+  data: CancelDealInput,
+) {
   const { company, site } = await verifySiteOwnership(siteId, userId)
   if (!company || !site) return { error: 'Site not found', status: 404 }
 
   const existing = await prisma.customer.findFirst({
-    where: { id: customerId, flatId, siteId: site.id, isDeleted: false },
+    where: { id: customerId, flatId, siteId: site.id, isDeleted: false, dealStatus: 'ACTIVE' },
+    include: {
+      ledgerEntries: { select: { amount: true, direction: true } },
+      flat: {
+        include: {
+          floor: true,
+        },
+      },
+    },
   })
   if (!existing) return { error: 'Customer not found', status: 404 }
 
-  const refundAmount = await getCustomerPaidTotal(customerId)
+  const refundAmount = normalizeCurrencyAmount(data.refundAmount)
+  const netPaid = normalizeCurrencyAmount(sumDirectionalLedgerAmounts(existing.ledgerEntries))
+  if (refundAmount < 0) {
+    return { error: 'Refund amount must be zero or greater', status: 400 }
+  }
+  if (refundAmount > netPaid) {
+    return { error: 'AMOUNT_EXCEEDS_LIMIT', status: 400 }
+  }
   if (refundAmount > 0) {
     const availableFund = await getSiteBalance(site.id)
     if (refundAmount > availableFund) {
@@ -335,8 +388,36 @@ export async function cancelBookingForUser(siteId: string, flatId: string, custo
 
   const transactionResult = await prisma
     .$transaction(async (tx: Prisma.TransactionClient) => {
+      const flat = await tx.flat.findFirst({
+        where: { id: flatId, siteId: site.id },
+        include: { floor: true },
+      })
+      if (!flat) throw new Error('FLAT_NOT_FOUND')
+      if (flat.status === 'AVAILABLE') throw new Error('FLAT_ALREADY_AVAILABLE')
+
+      const customer = await tx.customer.findFirst({
+        where: { id: customerId, flatId, siteId: site.id, isDeleted: false, dealStatus: 'ACTIVE' },
+        include: {
+          ledgerEntries: { select: { amount: true, direction: true } },
+          flat: { include: { floor: true } },
+        },
+      })
+      if (!customer || !customer.flat) throw new Error('CUSTOMER_NOT_FOUND')
+
+      const customerNetPaid = normalizeCurrencyAmount(sumDirectionalLedgerAmounts(customer.ledgerEntries))
+      if (refundAmount > customerNetPaid) throw new Error('REFUND_EXCEEDS_NET_PAID')
+
+      const snapshotFlat = customer.flat
+
+      let refundPayment: {
+        id: string
+        amount: number
+        direction: 'OUT'
+        movementType: 'CUSTOMER_REFUND'
+      } | null = null
+
       if (refundAmount > 0) {
-        await createLedgerEntry(
+        const payment = await createLedgerEntry(
           {
             companyId: company.id,
             siteId: site.id,
@@ -344,24 +425,68 @@ export async function cancelBookingForUser(siteId: string, flatId: string, custo
             direction: 'OUT',
             movementType: 'CUSTOMER_REFUND',
             amount: new Prisma.Decimal(refundAmount),
-            idempotencyKey: `customer-cancel:${customerId}:refund`,
-            note: 'Booking cancelled refund',
+            idempotencyKey: `customer-cancel:${customerId}:${Date.now()}:refund`,
+            note: data.reason,
             customerId,
           },
           tx,
         )
+
+        refundPayment = {
+          id: payment.id,
+          amount: Number(payment.amount),
+          direction: 'OUT',
+          movementType: 'CUSTOMER_REFUND',
+        }
       }
 
-      await tx.customer.update({
+      const customerAfterCancel = await tx.customer.update({
         where: { id: customerId },
-        data: { isDeleted: true, flatId: null },
+        data: {
+          dealStatus: 'CANCELLED',
+          isDeleted: false,
+          flatId: null,
+          cancelledAt: new Date(),
+          cancellationReason: data.reason,
+          cancelledByUserId: userId,
+          cancelledFromFlatStatus: snapshotFlat.status,
+          cancelledFlatId: snapshotFlat.id,
+          cancelledFlatDisplay: getFlatDisplayName(snapshotFlat),
+          cancelledFloorNumber: snapshotFlat.floor.floorNumber,
+          cancelledFloorName: snapshotFlat.floor.floorName,
+        },
+        include: {
+          ledgerEntries: { select: { amount: true, direction: true } },
+          flat: { include: { floor: true } },
+        },
       })
-      await tx.flat.update({
+
+      const flatAfterCancel = await tx.flat.update({
         where: { id: flatId },
         data: { status: 'AVAILABLE' },
       })
+
+      const amountPaid = await getCustomerPaidTotal(customerId, tx)
+      const remaining = await getCustomerRemaining(customerId, tx)
+
+      return {
+        customer: customerAfterCancel,
+        refund: refundPayment,
+        flat: flatAfterCancel,
+        amountPaid,
+        remaining,
+      }
     }, LEDGER_TX_OPTIONS)
     .catch(async (err: unknown) => {
+      if (err instanceof Error && (err.message === 'FLAT_NOT_FOUND' || err.message === 'CUSTOMER_NOT_FOUND')) {
+        return { error: 'Customer not found', status: 404 as const }
+      }
+      if (err instanceof Error && err.message === 'FLAT_ALREADY_AVAILABLE') {
+        return { error: 'Flat is already available', status: 400 as const }
+      }
+      if (err instanceof Error && err.message === 'REFUND_EXCEEDS_NET_PAID') {
+        return { error: 'AMOUNT_EXCEEDS_LIMIT', status: 400 as const }
+      }
       if (err instanceof LedgerError && err.code === 'INSUFFICIENT_FUNDS') {
         return buildCancelBookingInsufficientFundsError(site.id, refundAmount)
       }
@@ -373,6 +498,41 @@ export async function cancelBookingForUser(siteId: string, flatId: string, custo
 
   await invalidateCustomerCaches(company.id, siteId)
   await cacheService.del(CacheKeys.flatCustomer(flatId))
+
+  return {
+    customer: mapUpdatedCustomerResponse({
+      customer: transactionResult.customer as any,
+      amountPaid: transactionResult.amountPaid,
+      remaining: transactionResult.remaining,
+    }),
+    refund: transactionResult.refund,
+    flat: {
+      id: transactionResult.flat.id,
+      status: transactionResult.flat.status,
+    },
+  }
+}
+
+export async function cancelBookingForUser(siteId: string, flatId: string, customerId: string, userId: string) {
+  const { company, site } = await verifySiteOwnership(siteId, userId)
+  if (!company || !site) return { error: 'Site not found', status: 404 }
+
+  const existing = await prisma.customer.findFirst({
+    where: { id: customerId, flatId, siteId: site.id, isDeleted: false, dealStatus: 'ACTIVE' },
+    include: {
+      ledgerEntries: { select: { amount: true, direction: true } },
+    },
+  })
+  if (!existing) return { error: 'Customer not found', status: 404 }
+
+  const netPaid = normalizeCurrencyAmount(sumDirectionalLedgerAmounts(existing.ledgerEntries))
+
+  const result = await cancelDealForUser(siteId, flatId, customerId, userId, {
+    reason: 'Legacy delete cancel',
+    refundAmount: netPaid,
+  })
+
+  if (isCustomerServiceError(result)) return result
 
   return { message: `Booking for "${existing.name}" cancelled. Flat is now available.` }
 }

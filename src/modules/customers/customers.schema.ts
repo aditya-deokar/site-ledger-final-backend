@@ -15,6 +15,11 @@ export const updateCustomerSchema = z.object({
   email: z.string().email().optional(),
 })
 
+export const cancelDealSchema = z.object({
+  reason: z.string().trim().min(1),
+  refundAmount: z.number().min(0),
+})
+
 export const customerResponseSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -24,13 +29,22 @@ export const customerResponseSchema = z.object({
   bookingAmount: z.number(),
   amountPaid: z.number(),
   remaining: z.number(),
+  dealStatus: z.enum(['ACTIVE', 'CANCELLED']),
   customerType: z.enum(['CUSTOMER', 'EXISTING_OWNER']).nullable(),
-  flatId: z.string(),
-  flatNumber: z.number(),
-  floorNumber: z.number(),
-  flatStatus: z.string(),
+  flatId: z.string().nullable(),
+  flatNumber: z.number().nullable(),
+  floorNumber: z.number().nullable(),
+  flatStatus: z.string().nullable(),
   customFlatId: z.string().nullable().optional(),
   floorName: z.string().nullable().optional(),
+  cancelledAt: z.string().datetime().nullable(),
+  cancellationReason: z.string().nullable(),
+  cancelledByUserId: z.string().nullable(),
+  cancelledFromFlatStatus: z.enum(['AVAILABLE', 'BOOKED', 'SOLD']).nullable(),
+  cancelledFlatId: z.string().nullable(),
+  cancelledFlatDisplay: z.string().nullable(),
+  cancelledFloorNumber: z.number().nullable(),
+  cancelledFloorName: z.string().nullable(),
   createdAt: z.string().datetime(),
 })
 
@@ -43,6 +57,8 @@ export const customerPaymentSchema = z.object({
 export const customerPaymentHistoryItemSchema = z.object({
   id: z.string(),
   amount: z.number(),
+  direction: z.enum(['IN', 'OUT']),
+  movementType: z.enum(['CUSTOMER_PAYMENT', 'CUSTOMER_REFUND']),
   note: z.string().nullable(),
   createdAt: z.string().datetime(),
 })

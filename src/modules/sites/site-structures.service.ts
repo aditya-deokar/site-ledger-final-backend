@@ -1,5 +1,5 @@
 import { prisma } from '../../db/prisma.js'
-import { sumLedgerAmounts } from '../../services/customer-ledger.service.js'
+import { sumDirectionalLedgerAmounts } from '../../services/customer-ledger.service.js'
 import { invalidateSiteListCaches } from '../../services/cache-invalidation.js'
 import { cacheService } from '../../services/cache.service.js'
 import { CacheKeys, CacheTTL } from '../../config/cache-keys.js'
@@ -108,7 +108,7 @@ export async function getFloorsForUser(siteId: string, userId: string) {
           customer: {
             include: {
               ledgerEntries: {
-                select: { amount: true },
+                select: { amount: true, direction: true },
               },
             },
           },
@@ -132,7 +132,7 @@ export async function getFloorsForUser(siteId: string, userId: string) {
         flatType: flat.flatType,
         customer: flat.customer
           ? (() => {
-              const amountPaid = sumLedgerAmounts(flat.customer.ledgerEntries)
+              const amountPaid = sumDirectionalLedgerAmounts(flat.customer.ledgerEntries)
 
               return {
                 id: flat.customer.id,

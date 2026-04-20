@@ -255,17 +255,12 @@ export async function getSiteCustomerPayments(siteId: string): Promise<number> {
   const cached = await cacheService.get<number>(CacheKeys.siteCustomerPayments(siteId))
   if (cached !== null) return cached
 
-  const result = await prisma.payment.aggregate({
-    where: {
-      siteId,
-      walletType: 'SITE',
-      direction: 'IN',
-      customer: { siteId, isDeleted: false },
-    },
-    _sum: { amount: true },
+  const value = await getLedgerWalletBalance({
+    siteId,
+    walletType: 'SITE',
+    customer: { siteId },
   })
 
-  const value = Number(result._sum.amount ?? 0)
   await cacheService.set(CacheKeys.siteCustomerPayments(siteId), value, CacheTTL.FUND_CALCULATIONS)
   return value
 }

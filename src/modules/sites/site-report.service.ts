@@ -1,5 +1,5 @@
 import { prisma } from '../../db/prisma.js'
-import { sumLedgerAmounts } from '../../services/customer-ledger.service.js'
+import { sumDirectionalLedgerAmounts } from '../../services/customer-ledger.service.js'
 import { calculateInvestorLedgerTotals } from '../../services/investor-ledger.service.js'
 import { mapSiteExpense } from './site-expenses.mapper.js'
 import { getSiteForUser } from './site-access.service.js'
@@ -30,6 +30,8 @@ function mapRecentActivityLabel(movementType: string) {
       return { kind: 'fund', title: 'Fund pulled from site' }
     case 'CUSTOMER_PAYMENT':
       return { kind: 'customer', title: 'Customer payment received' }
+    case 'CUSTOMER_REFUND':
+      return { kind: 'customer', title: 'Customer refund recorded' }
     case 'EXPENSE_PAYMENT':
       return { kind: 'expense', title: 'Expense payment recorded' }
     case 'INVESTOR_PRINCIPAL_IN':
@@ -79,13 +81,13 @@ export async function getSiteReportForUser(siteId: string, userId: string) {
           orderBy: { flatNumber: 'asc' },
           include: {
             customer: {
-              where: { isDeleted: false },
+              where: { isDeleted: false, dealStatus: 'ACTIVE' },
               select: {
                 name: true,
                 customerType: true,
                 sellingPrice: true,
                 bookingAmount: true,
-                ledgerEntries: { select: { amount: true } },
+                ledgerEntries: { select: { amount: true, direction: true } },
               },
             },
           },
@@ -93,10 +95,10 @@ export async function getSiteReportForUser(siteId: string, userId: string) {
       },
     }),
     prisma.customer.findMany({
-      where: { siteId: site.id, isDeleted: false },
+      where: { siteId: site.id, isDeleted: false, dealStatus: 'ACTIVE' },
       orderBy: { createdAt: 'desc' },
       include: {
-        ledgerEntries: { select: { amount: true } },
+        ledgerEntries: { select: { amount: true, direction: true } },
         flat: {
           select: {
             status: true,
@@ -169,7 +171,7 @@ export async function getSiteReportForUser(siteId: string, userId: string) {
   const floors = floorsRaw.map((floor) => {
     const displayName = getFloorDisplayName(floor.floorName, floor.floorNumber)
     const flats = floor.flats.map((flat) => {
-      const amountPaid = flat.customer ? sumLedgerAmounts(flat.customer.ledgerEntries) : null
+      const amountPaid = flat.customer ? sumDirectionalLedgerAmounts(flat.customer.ledgerEntries) : null
       const remaining = flat.customer ? flat.customer.sellingPrice - amountPaid! : null
 
       return {
@@ -204,7 +206,7 @@ export async function getSiteReportForUser(siteId: string, userId: string) {
   })
 
   const customers = customersRaw.map((customer) => {
-    const amountPaid = sumLedgerAmounts(customer.ledgerEntries)
+    const amountPaid = sumDirectionalLedgerAmounts(customer.ledgerEntries)
     return {
       id: customer.id,
       name: customer.name,
@@ -356,4 +358,3 @@ export async function getSiteReportForUser(siteId: string, userId: string) {
     recentActivity,
   }
 }
-

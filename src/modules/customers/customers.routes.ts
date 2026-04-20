@@ -3,6 +3,7 @@ import type { AuthContext } from '../../types/auth.js'
 import { requireJwt } from '../../middlewares/jwt.js'
 import { jsonError, jsonOk } from '../../utils/response.js'
 import {
+  cancelDealSchema,
   createCustomerSchema,
   customerResponseSchema,
   errorResponseSchema,
@@ -11,6 +12,7 @@ import {
 } from './customers.schema.js'
 import {
   bookFlatForUser,
+  cancelDealForUser,
   cancelBookingForUser,
   getAllCustomersForUser,
   getFlatCustomerForUser,
@@ -53,10 +55,21 @@ const getAllCustomersRoute = createRoute({
                   bookingAmount: z.number(),
                   amountPaid: z.number(),
                   remaining: z.number(),
+                  dealStatus: z.enum(['ACTIVE', 'CANCELLED']),
                   flatId: z.string().nullable(),
                   flatNumber: z.number().nullable(),
                   floorNumber: z.number().nullable(),
                   flatStatus: z.string().nullable(),
+                  customFlatId: z.string().nullable().optional(),
+                  floorName: z.string().nullable().optional(),
+                  cancelledAt: z.string().datetime().nullable(),
+                  cancellationReason: z.string().nullable(),
+                  cancelledByUserId: z.string().nullable(),
+                  cancelledFromFlatStatus: z.enum(['AVAILABLE', 'BOOKED', 'SOLD']).nullable(),
+                  cancelledFlatId: z.string().nullable(),
+                  cancelledFlatDisplay: z.string().nullable(),
+                  cancelledFloorNumber: z.number().nullable(),
+                  cancelledFloorName: z.string().nullable(),
                   siteId: z.string().nullable(),
                   siteName: z.string().nullable(),
                   createdAt: z.string().datetime(),
@@ -263,12 +276,90 @@ customerRoutes.openapi(updateCustomerRoute, async (c) => {
   return jsonOk(c, result) as any
 })
 
+const cancelDealRoute = createRoute({
+  method: 'patch',
+  path: '/{siteId}/flats/{flatId}/customer/{id}/cancel',
+  tags: ['Customers'],
+  summary: 'Cancel deal and free the flat',
+  description: 'Cancels an active flat deal, optionally records a partial or full refund, snapshots flat metadata for audit, and resets the flat to AVAILABLE.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ siteId: z.string(), flatId: z.string(), id: z.string() }),
+    body: {
+      content: {
+        'application/json': {
+          schema: cancelDealSchema,
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      content: {
+        'application/json': {
+          schema: z.object({
+            ok: z.literal(true),
+            data: z.object({
+              customer: customerResponseSchema,
+              refund: z.object({
+                id: z.string(),
+                amount: z.number(),
+                direction: z.literal('OUT'),
+                movementType: z.literal('CUSTOMER_REFUND'),
+              }).nullable(),
+              flat: z.object({
+                id: z.string(),
+                status: z.literal('AVAILABLE'),
+              }),
+            }),
+          }),
+        },
+      },
+      description: 'Deal cancelled and flat released',
+    },
+    400: {
+      content: { 'application/json': { schema: insufficientFundsErrorResponseSchema } },
+      description: 'Invalid cancel request or insufficient site funds',
+    },
+    404: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: 'Customer, flat, or site not found',
+    },
+  },
+})
+
+customerRoutes.openapi(cancelDealRoute, async (c) => {
+  const auth = c.get('auth')
+  const { siteId, flatId, id } = c.req.valid('param')
+  const parsed = c.req.valid('json')
+
+  const result = await cancelDealForUser(siteId, flatId, id, auth.userId, parsed)
+  if (isCustomerServiceError(result)) {
+    if (result.error === 'INSUFFICIENT_FUNDS') {
+      return c.json(
+        {
+          ok: false,
+          error: result.error,
+          availableFund: result.availableFund,
+          refundAmount: result.refundAmount,
+          shortfall: result.shortfall,
+        },
+        result.status as any,
+      )
+    }
+
+    return jsonError(c, result.error, result.status) as any
+  }
+
+  return jsonOk(c, result) as any
+})
+
 const cancelBookingRoute = createRoute({
   method: 'delete',
   path: '/{siteId}/flats/{flatId}/customer/{id}',
   tags: ['Customers'],
-  summary: 'Cancel booking',
-  description: 'Cancel a flat booking by removing the customer record. The flat status is reset to AVAILABLE.',
+  summary: 'Cancel booking (legacy compatibility)',
+  description: 'Legacy compatibility endpoint. Cancels an active flat deal with a full refund and resets the flat to AVAILABLE.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ siteId: z.string(), flatId: z.string(), id: z.string() }),
