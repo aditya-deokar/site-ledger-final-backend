@@ -5,7 +5,6 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 model User {
@@ -137,6 +136,7 @@ model Flat {
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
   customFlatId String?
+  unitType     String?
   flatType     String     @default("CUSTOMER")
   customer     Customer?
   floor        Floor      @relation(fields: [floorId], references: [id], onDelete: Cascade)

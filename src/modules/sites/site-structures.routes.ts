@@ -105,6 +105,7 @@ export function registerSiteStructureRoutes(siteRoutes: SiteRouteApp) {
                 flat: z.object({
                   id: z.string(),
                   customFlatId: z.string(),
+                  unitType: z.string().nullable(),
                   status: z.string(),
                 }),
               }),
@@ -141,6 +142,7 @@ export function registerSiteStructureRoutes(siteRoutes: SiteRouteApp) {
         flat: {
           id: flat.id,
           customFlatId: flat.customFlatId,
+          unitType: flat.unitType,
           status: flat.status,
         },
       },
@@ -175,6 +177,7 @@ export function registerSiteStructureRoutes(siteRoutes: SiteRouteApp) {
                         id: z.string(),
                         flatNumber: z.number().nullable(),
                         customFlatId: z.string().nullable(),
+                        unitType: z.string().nullable(),
                         status: z.string(),
                         flatType: z.string(),
                         customer: z
@@ -413,6 +416,7 @@ export function registerSiteStructureRoutes(siteRoutes: SiteRouteApp) {
                 flat: z.object({
                   id: z.string(),
                   customFlatId: z.string().nullable(),
+                  unitType: z.string().nullable(),
                   flatType: z.string(),
                   status: z.string(),
                 }),
@@ -448,6 +452,7 @@ export function registerSiteStructureRoutes(siteRoutes: SiteRouteApp) {
       flat: {
         id: updated.id,
         customFlatId: updated.customFlatId,
+        unitType: updated.unitType,
         flatType: updated.flatType,
         status: updated.status,
       },

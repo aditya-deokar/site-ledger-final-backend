@@ -53,7 +53,7 @@ export async function createFlatForUser(
   siteId: string,
   floorId: string,
   userId: string,
-  data: { customFlatId: string; flatType?: 'CUSTOMER' | 'EXISTING_OWNER' },
+  data: { customFlatId: string; unitType?: string; flatType?: 'CUSTOMER' | 'EXISTING_OWNER' },
 ) {
   const { company, site } = await getSiteForUser(siteId, userId)
   if (!company || !site) return null
@@ -76,6 +76,7 @@ export async function createFlatForUser(
       siteId: site.id,
       floorId: floor.id,
       customFlatId: data.customFlatId,
+      unitType: data.unitType?.trim() || null,
       flatType,
       status: 'AVAILABLE',
     },
@@ -128,6 +129,7 @@ export async function getFloorsForUser(siteId: string, userId: string) {
         id: flat.id,
         flatNumber: flat.flatNumber,
         customFlatId: flat.customFlatId,
+        unitType: flat.unitType,
         status: flat.status,
         flatType: flat.flatType,
         customer: flat.customer
@@ -246,7 +248,7 @@ export async function updateFlatDetailsForUser(
   siteId: string,
   flatId: string,
   userId: string,
-  data: { customFlatId: string; flatType?: 'CUSTOMER' | 'EXISTING_OWNER' },
+  data: { customFlatId: string; unitType?: string; flatType?: 'CUSTOMER' | 'EXISTING_OWNER' },
 ) {
   const { company, site } = await getSiteForUser(siteId, userId)
   if (!company || !site) return null
@@ -282,6 +284,7 @@ export async function updateFlatDetailsForUser(
     where: { id: flat.id },
     data: {
       customFlatId: data.customFlatId,
+      unitType: data.unitType?.trim() || flat.unitType,
       flatType,
     },
   })
