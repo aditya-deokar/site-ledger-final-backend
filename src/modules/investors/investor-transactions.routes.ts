@@ -90,9 +90,9 @@ export function registerInvestorTransactionRoutes(investorRoutes: InvestorRouteA
     method: 'post',
     path: '/{id}/return',
     tags: ['Investors'],
-    summary: 'Return investment to investor',
+    summary: 'Return principal to fixed-rate investor',
     description:
-      'Record a return of funds to an investor (partial or full). EQUITY returns reduce site equity funding based on invested principal. FIXED_RATE returns reduce company available fund. A negative transaction record is created for audit history.',
+      'Record a principal return to a FIXED_RATE investor (partial or full). Equity investors should use the profit payout route instead of principal return.',
     security: [{ bearerAuth: [] }],
     request: {
       params: z.object({ id: z.string() }),
@@ -142,9 +142,9 @@ export function registerInvestorTransactionRoutes(investorRoutes: InvestorRouteA
     method: 'post',
     path: '/{id}/interest',
     tags: ['Investors'],
-    summary: 'Pay interest to fixed-rate investor',
+    summary: 'Record investor payout',
     description:
-      "Pay interest to a FIXED_RATE investor. This reduces company available fund but does not touch the investor's principal. Only available for FIXED_RATE investors. A negative transaction is created for audit history.",
+      "Record a payout for an investor. FIXED_RATE investors receive interest; EQUITY investors receive profit share. The payout reduces the relevant wallet balance without reducing principal.",
     security: [{ bearerAuth: [] }],
     request: {
       params: z.object({ id: z.string() }),
@@ -167,7 +167,7 @@ export function registerInvestorTransactionRoutes(investorRoutes: InvestorRouteA
       },
       400: {
         content: { 'application/json': { schema: errorResponseSchema } },
-        description: 'Not a fixed-rate investor or insufficient funds',
+        description: 'Invalid payout or insufficient funds',
       },
       404: {
         content: { 'application/json': { schema: errorResponseSchema } },

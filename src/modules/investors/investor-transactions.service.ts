@@ -1,4 +1,4 @@
-import { Prisma, type InvestorTransactionKind } from '@prisma/client'
+import { Prisma, type InvestorTransactionKind, type InvestorType } from '@prisma/client'
 import { prisma } from '../../db/prisma.js'
 import { createLedgerEntry } from '../../services/ledger.service.js'
 import {
@@ -53,17 +53,87 @@ function resolveLedgerConfig(
   }
 }
 
-function getDefaultLedgerNote(kind: 'PRINCIPAL_IN' | 'PRINCIPAL_OUT' | 'INTEREST') {
+function getDefaultLedgerNote(
+  kind: 'PRINCIPAL_IN' | 'PRINCIPAL_OUT' | 'INTEREST',
+  investorType: InvestorType,
+) {
   if (kind === 'PRINCIPAL_IN') return 'Investor principal received'
   if (kind === 'PRINCIPAL_OUT') return 'Investor principal payout'
-  return 'Investor interest payout'
+  return investorType === 'EQUITY' ? 'Equity profit share payout' : 'Investor interest payout'
+}
+
+function roundCurrencyAmount(value: number) {
+  return Math.round(value * 100) / 100
+}
+
+async function getEquityProfitShareStatus(
+  investor: { id: string; siteId: string | null; equityPercentage: number | null },
+  tx?: Prisma.TransactionClient,
+) {
+  if (!investor.siteId) {
+    throw new Error('EQUITY_SITE_REQUIRED')
+  }
+
+  const db = tx ?? prisma
+  const [revenueResult, expensesResult, summary, profitShareTransactions] = await Promise.all([
+    db.customer.aggregate({
+      where: {
+        siteId: investor.siteId,
+        isDeleted: false,
+        dealStatus: 'ACTIVE',
+      },
+      _sum: { sellingPrice: true },
+    }),
+    db.expense.aggregate({
+      where: { siteId: investor.siteId, isDeleted: false },
+      _sum: { amount: true },
+    }),
+    getInvestorLedgerSummary(investor.id, db),
+    db.investorTransaction.findMany({
+      where: {
+        investorId: investor.id,
+        isDeleted: false,
+        kind: 'INTEREST',
+      },
+      select: {
+        amount: true,
+        ledgerEntries: {
+          select: { amount: true },
+        },
+      },
+    }),
+  ])
+
+  const siteProfit = Math.max(Number(revenueResult._sum.sellingPrice ?? 0) - Number(expensesResult._sum.amount ?? 0), 0)
+  const estimatedShare = roundCurrencyAmount(((investor.equityPercentage ?? 0) / 100) * siteProfit)
+  const recordedShare = roundCurrencyAmount(
+    profitShareTransactions.reduce((sum, transaction) => sum + Number(transaction.amount), 0),
+  )
+  const pendingShare = roundCurrencyAmount(
+    profitShareTransactions.reduce((sum, transaction) => {
+      const paid = transaction.ledgerEntries.reduce((paidTotal, entry) => paidTotal + Number(entry.amount), 0)
+      return sum + Math.max(Number(transaction.amount) - paid, 0)
+    }, 0),
+  )
+  const availableToRecord = Math.max(roundCurrencyAmount(estimatedShare - recordedShare), 0)
+
+  return {
+    siteProfit,
+    estimatedShare,
+    recordedShare,
+    pendingShare,
+    availableToRecord,
+    profitPaid: summary.interestTotal,
+    principalInvested: summary.principalInTotal,
+    hasOpenProfitShare: pendingShare > 0,
+  }
 }
 
 async function createInvestorTransactionDocumentWithLedger(
   tx: Prisma.TransactionClient,
   input: {
     companyId: string
-    investor: { id: string; siteId: string | null }
+    investor: { id: string; siteId: string | null; type: InvestorType }
     kind: 'PRINCIPAL_IN' | 'PRINCIPAL_OUT' | 'INTEREST'
     amount: number
     amountPaid: number
@@ -95,7 +165,7 @@ async function createInvestorTransactionDocumentWithLedger(
         idempotencyKey:
           input.idempotencyKey ?? `investor-${input.kind.toLowerCase()}:${transaction.id}:${Date.now()}`,
         postedAt: input.paymentDate ? new Date(input.paymentDate) : undefined,
-        note: input.note ?? getDefaultLedgerNote(input.kind),
+        note: input.note ?? getDefaultLedgerNote(input.kind, input.investor.type),
         investorTransactionId: transaction.id,
       },
       tx,
@@ -162,6 +232,13 @@ export async function returnInvestmentForUser(
   const { company, investor } = await getInvestorForUser(investorId, userId)
   if (!company || !investor) return null
 
+  if (investor.type !== 'FIXED_RATE') {
+    return {
+      error: 'Principal return is only available for fixed-rate investors. Use profit payout for equity investors.',
+      status: 400,
+    }
+  }
+
   const { amount, note, amountPaid = 0, paymentDate, idempotencyKey } = data
   if (amountPaid > amount) return { error: 'AMOUNT_EXCEEDS_LIMIT', status: 400 }
 
@@ -213,12 +290,36 @@ export async function payInterestForUser(
   const { company, investor } = await getInvestorForUser(investorId, userId)
   if (!company || !investor) return null
 
-  if (investor.type !== 'FIXED_RATE') {
-    return { error: 'Interest payments are only for fixed-rate investors', status: 400 }
-  }
-
   const { amount, note, amountPaid = 0, paymentDate, idempotencyKey } = data
   if (amountPaid > amount) return { error: 'AMOUNT_EXCEEDS_LIMIT', status: 400 }
+
+  if (investor.type === 'EQUITY') {
+    if (!investor.siteId) {
+      return { error: 'Equity investor must be linked to a site before recording profit share', status: 400 }
+    }
+
+    const profitShareStatus = await getEquityProfitShareStatus(investor)
+    if (profitShareStatus.principalInvested <= 0) {
+      return {
+        error: 'Profit share can only be recorded after investor capital has actually been paid into the site.',
+        status: 400,
+      }
+    }
+
+    if (profitShareStatus.hasOpenProfitShare) {
+      return {
+        error: 'A profit share payout is already pending for this investor. Use the existing partial row to record the remaining payment.',
+        status: 400,
+      }
+    }
+
+    if (amount > profitShareStatus.availableToRecord) {
+      return {
+        error: `Profit payout (${amount}) exceeds available profit share to record (${profitShareStatus.availableToRecord})`,
+        status: 400,
+      }
+    }
+  }
 
   const transactionId = await prisma.$transaction(
     async (tx) => {
@@ -228,7 +329,7 @@ export async function payInterestForUser(
         kind: 'INTEREST',
         amount,
         amountPaid,
-        note: note ?? 'Interest payment',
+        note: note ?? (investor.type === 'EQUITY' ? 'Profit share payout' : 'Interest payment'),
         paymentDate,
         idempotencyKey,
       })
@@ -315,7 +416,7 @@ export async function updateTransactionPaymentForUser(
           movementType: ledgerConfig.movementType,
           amount: new Prisma.Decimal(data.amount),
           idempotencyKey: data.idempotencyKey ?? `investor-payment:${transactionId}:${Date.now()}`,
-          note: data.note ?? getDefaultLedgerNote(transaction.kind),
+          note: data.note ?? getDefaultLedgerNote(transaction.kind, investor.type),
           investorTransactionId: transactionId,
         },
         tx,
