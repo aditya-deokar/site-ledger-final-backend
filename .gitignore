@@ -13,3 +13,6 @@ dist
 
 # Ignore the features
 features.md
+
+# Kiro specs and configuration
+.kiro/

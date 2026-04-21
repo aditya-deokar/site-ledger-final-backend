@@ -53,6 +53,7 @@ model Company {
   payments    Payment[]
   sites       Site[]
   vendors     Vendor[]
+  employees   Employee[]
 }
 
 model Partner {
@@ -246,6 +247,98 @@ model Payment {
   @@index([movementType, postedAt])
 }
 
+model Employee {
+  id            String                @id @default(cuid())
+  companyId     String
+  name          String
+  email         String?
+  phone         String
+  address       String
+  photo         String?
+  employeeId    String
+  designation   String
+  department    String
+  dateOfJoining DateTime
+  salary        Float
+  status        EmployeeStatus        @default(ACTIVE)
+  isDeleted     Boolean               @default(false)
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+  company       Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  documents     EmployeeDocument[]
+  attendance    Attendance[]
+  transactions  EmployeeTransaction[]
+  reminders     SalaryReminder[]
+
+  @@unique([companyId, employeeId])
+  @@index([companyId, status, createdAt])
+  @@index([companyId, department])
+}
+
+model EmployeeDocument {
+  id           String   @id @default(cuid())
+  employeeId   String
+  documentType String
+  documentName String
+  fileUrl      String?
+  keyValueData Json?    @db.JsonB
+  uploadedAt   DateTime @default(now())
+  employee     Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@index([employeeId, uploadedAt])
+}
+
+model Attendance {
+  id                  String           @id @default(cuid())
+  employeeId          String
+  date                DateTime
+  status              AttendanceStatus
+  checkInTime         DateTime?
+  checkOutTime        DateTime?
+  reasonOfAbsenteeism String?
+  markedBy            String
+  createdAt           DateTime         @default(now())
+  employee            Employee         @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([employeeId, date])
+  @@index([employeeId, date])
+}
+
+model EmployeeTransaction {
+  id            String                    @id @default(cuid())
+  employeeId    String
+  type          EmployeeTransactionType
+  amount        Float
+  description   String
+  date          DateTime
+  paymentMethod EmployeePaymentMethod?
+  status        EmployeeTransactionStatus @default(PENDING)
+  createdAt     DateTime                  @default(now())
+  paidAt        DateTime?
+  employee      Employee                  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@index([employeeId, date])
+  @@index([employeeId, type, status])
+}
+
+model SalaryReminder {
+  id           String              @id @default(cuid())
+  employeeId   String
+  month        Int
+  year         Int
+  salaryAmount Float
+  dueDate      DateTime
+  status       SalaryReminderStatus @default(PENDING)
+  reminderSent Boolean             @default(false)
+  createdAt    DateTime            @default(now())
+  paidAt       DateTime?
+  transactionId String?
+  employee     Employee            @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([employeeId, month, year])
+  @@index([year, month, status])
+}
+
 enum ExpenseType {
   GENERAL
   VENDOR
@@ -296,6 +389,44 @@ enum InvestorTransactionKind {
   PRINCIPAL_IN
   PRINCIPAL_OUT
   INTEREST
+}
+
+enum EmployeeStatus {
+  ACTIVE
+  INACTIVE
+  TERMINATED
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  HALF_DAY
+}
+
+enum EmployeeTransactionType {
+  SALARY
+  BONUS
+  DEDUCTION
+  ADVANCE
+  REIMBURSEMENT
+}
+
+enum EmployeePaymentMethod {
+  CASH
+  BANK_TRANSFER
+  CHEQUE
+}
+
+enum EmployeeTransactionStatus {
+  PENDING
+  PAID
+  FAILED
+}
+
+enum SalaryReminderStatus {
+  PENDING
+  PAID
+  OVERDUE
 }
 
 enum PaymentStatus {

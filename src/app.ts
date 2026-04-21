@@ -10,6 +10,11 @@ import { siteRoutes } from './routes/sites.js'
 import { vendorRoutes } from './routes/vendors.js'
 import { customerRoutes } from './routes/customers.js'
 import { investorRoutes } from './routes/investors.js'
+import { employeeRoutes } from './routes/employees.js'
+import { attendanceRoutes } from './routes/attendance.js'
+import { employeeTransactionRoutes } from './routes/transactions.js'
+import { salaryReminderRoutes } from './routes/reminders.js'
+import { employeeDocumentRoutes } from './routes/documents.js'
 import { LedgerError } from './services/ledger.service.js'
 import { jsonError } from './utils/response.js'
 import { requestId } from './middlewares/request-id.js'
@@ -82,6 +87,11 @@ app.doc('/openapi.json', {
     { name: 'Vendors', description: 'Manage vendors (electrician, plumber, supplier, etc.)' },
     { name: 'Customers', description: 'Customer flat booking and payment tracking' },
     { name: 'Investors', description: 'Manage equity and fixed-rate investors with transaction history' },
+    { name: 'Employees', description: 'Manage employee profiles and employment details' },
+    { name: 'Attendance', description: 'Mark and track employee attendance' },
+    { name: 'Employee Transactions', description: 'Track salary, bonus, deduction, and other employee transactions' },
+    { name: 'Salary Reminders', description: 'Generate and track monthly salary reminders' },
+    { name: 'Employee Documents', description: 'Store and retrieve employee documents and metadata' },
   ],
   components: {
     securitySchemes: {
@@ -104,6 +114,11 @@ app.route('/api/vendors', vendorRoutes)
 app.route('/api/sites', customerRoutes)
 app.route('/api/customers', customerRoutes)
 app.route('/api/investors', investorRoutes)
+app.route('/api/employees', employeeRoutes)
+app.route('/api/attendance', attendanceRoutes)
+app.route('/api/transactions', employeeTransactionRoutes)
+app.route('/api/reminders', salaryReminderRoutes)
+app.route('/api/documents', employeeDocumentRoutes)
 
 app.notFound((c: Context) => jsonError(c, 'Not Found', 404))
 
