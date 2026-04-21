@@ -94,7 +94,7 @@ const log = createLogger('server')
 
 async function start() {
   // Connect Redis (non-blocking — app runs even if Redis fails)
-  await connectRedis()
+  void connectRedis()
 
   const server = serve({
     fetch: app.fetch,
