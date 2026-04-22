@@ -15,6 +15,22 @@ import { invalidateSiteListCaches } from '../../services/cache-invalidation.js'
 import { cacheService } from '../../services/cache.service.js'
 import { CacheKeys, CacheTTL } from '../../config/cache-keys.js'
 
+export type SiteServiceError = {
+  error: string
+  status: number
+}
+
+export function isSiteServiceError(result: unknown): result is SiteServiceError {
+  return (
+    typeof result === 'object' &&
+    result !== null &&
+    'error' in result &&
+    typeof result.error === 'string' &&
+    'status' in result &&
+    typeof result.status === 'number'
+  )
+}
+
 function distributeFlatsAcrossFloors(totalFloors: number, totalFlats: number) {
   if (totalFloors <= 0) return []
 
@@ -364,6 +380,27 @@ export async function deleteSiteForUser(siteId: string, userId: string, keepCust
     where: { id: siteId, companyId: company.id },
   })
   if (!site) return null
+
+  const [paymentCount, expenseCount, customerCount, investorCount] = await prisma.$transaction([
+    prisma.payment.count({ where: { siteId: site.id } }),
+    prisma.expense.count({ where: { siteId: site.id } }),
+    prisma.customer.count({ where: { siteId: site.id } }),
+    prisma.investor.count({ where: { siteId: site.id } }),
+  ])
+
+  const hasFinancialOrOperationalHistory =
+    paymentCount > 0 ||
+    expenseCount > 0 ||
+    customerCount > 0 ||
+    investorCount > 0
+
+  if (hasFinancialOrOperationalHistory) {
+    return {
+      error:
+        'A site can be permanently deleted only if it has no financial or operational history. Once any real activity exists, the site should only be archived.',
+      status: 409,
+    }
+  }
 
   if (keepCustomers === 'true') {
     await prisma.customer.updateMany({

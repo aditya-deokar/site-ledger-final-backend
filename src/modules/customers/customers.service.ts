@@ -129,6 +129,8 @@ export async function bookFlatForUser(
     email?: string
     sellingPrice: number
     bookingAmount: number
+    paymentMode?: 'CASH' | 'CHEQUE' | 'BANK_TRANSFER' | 'UPI'
+    referenceNumber?: string
     customerType?: 'CUSTOMER' | 'EXISTING_OWNER'
   },
 ) {
@@ -176,6 +178,8 @@ export async function bookFlatForUser(
               amount: new Prisma.Decimal(data.bookingAmount),
               idempotencyKey: `customer-booking:${customer.id}:${Date.now()}`,
               note: 'Initial booking amount',
+              paymentMode: data.paymentMode,
+              referenceNumber: data.referenceNumber?.trim() || undefined,
               customerId: customer.id,
             },
             tx,

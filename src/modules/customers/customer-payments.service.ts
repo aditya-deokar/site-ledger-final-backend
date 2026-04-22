@@ -12,7 +12,13 @@ import { mapCustomerPaymentHistoryItem } from './customers.mapper.js'
 export async function recordCustomerPaymentForUser(
   customerId: string,
   userId: string,
-  data: { amount: number; note?: string; idempotencyKey?: string },
+  data: {
+    amount: number
+    note?: string
+    idempotencyKey?: string
+    paymentMode: 'CASH' | 'CHEQUE' | 'BANK_TRANSFER' | 'UPI'
+    referenceNumber?: string
+  },
 ) {
   const { company, customer } = await getCustomerForUser(customerId, userId)
   if (!company) return { error: 'Company not found', status: 404 }
@@ -30,6 +36,8 @@ export async function recordCustomerPaymentForUser(
     return { error: 'AMOUNT_EXCEEDS_LIMIT', status: 400 }
   }
 
+  const normalizedReferenceNumber = data.referenceNumber?.trim() || undefined
+
   const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const payment = await createLedgerEntry(
       {
@@ -41,6 +49,8 @@ export async function recordCustomerPaymentForUser(
         amount: new Prisma.Decimal(data.amount),
         idempotencyKey: data.idempotencyKey ?? `customer-payment:${customerId}:${Date.now()}`,
         note: data.note || 'Installment payment',
+        paymentMode: data.paymentMode,
+        referenceNumber: normalizedReferenceNumber,
         customerId,
       },
       tx,
@@ -71,6 +81,9 @@ export async function recordCustomerPaymentForUser(
     payment: {
       id: result.payment.id,
       amount: Number(result.payment.amount),
+      paymentMode: result.payment.paymentMode,
+      referenceNumber: result.payment.referenceNumber,
+      note: result.payment.note,
       createdAt: result.payment.postedAt,
     },
   }

@@ -5,6 +5,7 @@ import {
   customerPaymentHistoryItemSchema,
   customerPaymentSchema,
   errorResponseSchema,
+  paymentModeSchema,
 } from './customers.schema.js'
 import { getCustomerPaymentsForUser, recordCustomerPaymentForUser } from './customer-payments.service.js'
 import { isCustomerServiceError } from './customers.service.js'
@@ -36,7 +37,14 @@ export function registerCustomerPaymentRoutes(customerRoutes: CustomerRouteApp) 
               ok: z.literal(true),
               data: z.object({
                 customer: z.object({ id: z.string(), amountPaid: z.number(), remaining: z.number() }),
-                payment: z.object({ id: z.string(), amount: z.number(), createdAt: z.string().datetime() }),
+                payment: z.object({
+                  id: z.string(),
+                  amount: z.number(),
+                  paymentMode: paymentModeSchema.nullable(),
+                  referenceNumber: z.string().nullable(),
+                  note: z.string().nullable(),
+                  createdAt: z.string().datetime(),
+                }),
               }),
             }),
           },

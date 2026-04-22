@@ -9,6 +9,7 @@ import {
   deleteSiteForUser,
   getSiteDetailForUser,
   getSitesForUser,
+  isSiteServiceError,
   toggleSiteForUser,
 } from './sites.service.js'
 import { getSiteReportForUser } from './site-report.service.js'
@@ -318,9 +319,9 @@ const deleteSiteRoute = createRoute({
   method: 'delete',
   path: '/{id}',
   tags: ['Sites'],
-  summary: 'Permanently delete a site',
+  summary: 'Permanently delete an unused site',
   description:
-    'Permanently deletes the site and all associated data (floors, flats, funds, expenses). Vendors are NOT affected (they are company-level). Pass `keepCustomers=true` to preserve customer financial records; otherwise customers are deleted with the site.',
+    'Permanently deletes a site only when it has no financial or operational history. Once any real activity exists, the site should be archived instead of deleted.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ id: z.string() }),
@@ -344,6 +345,10 @@ const deleteSiteRoute = createRoute({
       content: { 'application/json': { schema: errorResponseSchema } },
       description: 'Site not found',
     },
+    409: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: 'Site has financial or operational history and must be archived',
+    },
   },
 })
 
@@ -354,6 +359,7 @@ siteRoutes.openapi(deleteSiteRoute, async (c) => {
 
   const deletedSite = await deleteSiteForUser(id, auth.userId, keepCustomers)
   if (!deletedSite) return jsonError(c, 'Site not found', 404) as any
+  if (isSiteServiceError(deletedSite)) return jsonError(c, deletedSite.error, deletedSite.status) as any
 
   return jsonOk(c, { message: `Site "${deletedSite.name}" permanently deleted` }) as any
 })

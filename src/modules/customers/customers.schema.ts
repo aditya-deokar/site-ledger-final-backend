@@ -1,12 +1,32 @@
 import { z } from '@hono/zod-openapi'
 
+export const paymentModeSchema = z.enum(['CASH', 'CHEQUE', 'BANK_TRANSFER', 'UPI'])
+
 export const createCustomerSchema = z.object({
   name: z.string().min(1),
   phone: z.string().optional(),
   email: z.string().email().optional(),
   sellingPrice: z.number().min(0),
   bookingAmount: z.number().min(0),
+  paymentMode: paymentModeSchema.optional(),
+  referenceNumber: z.string().trim().optional(),
   customerType: z.enum(['CUSTOMER', 'EXISTING_OWNER']).optional(),
+}).superRefine((data, ctx) => {
+  if (data.bookingAmount > 0 && !data.paymentMode) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Payment mode is required when recording a booking amount',
+      path: ['paymentMode'],
+    })
+  }
+
+  if (data.bookingAmount > 0 && data.paymentMode && data.paymentMode !== 'CASH' && !data.referenceNumber?.trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Reference number is required for non-cash booking payments',
+      path: ['referenceNumber'],
+    })
+  }
 })
 
 export const updateCustomerSchema = z.object({
@@ -52,6 +72,16 @@ export const customerPaymentSchema = z.object({
   amount: z.number().positive(),
   note: z.string().optional(),
   idempotencyKey: z.string().optional(),
+  paymentMode: paymentModeSchema,
+  referenceNumber: z.string().trim().optional(),
+}).superRefine((data, ctx) => {
+  if (data.paymentMode !== 'CASH' && !data.referenceNumber?.trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Reference number is required for non-cash payments',
+      path: ['referenceNumber'],
+    })
+  }
 })
 
 export const customerPaymentHistoryItemSchema = z.object({
@@ -59,6 +89,8 @@ export const customerPaymentHistoryItemSchema = z.object({
   amount: z.number(),
   direction: z.enum(['IN', 'OUT']),
   movementType: z.enum(['CUSTOMER_PAYMENT', 'CUSTOMER_REFUND']),
+  paymentMode: paymentModeSchema.nullable(),
+  referenceNumber: z.string().nullable(),
   note: z.string().nullable(),
   createdAt: z.string().datetime(),
 })

@@ -244,6 +244,8 @@ model Payment {
   movementType          MovementType
   amount                Decimal              @db.Decimal(18, 2)
   postedAt              DateTime             @default(now())
+  paymentMode           PaymentMode?
+  referenceNumber       String?
   note                  String?
   idempotencyKey        String
   entryGroupId          String?
@@ -402,6 +404,13 @@ enum Direction {
 enum WalletType {
   COMPANY
   SITE
+}
+
+enum PaymentMode {
+  CASH
+  CHEQUE
+  BANK_TRANSFER
+  UPI
 }
 
 enum InvestorTransactionKind {

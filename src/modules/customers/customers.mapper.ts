@@ -193,6 +193,8 @@ export function mapCustomerPaymentHistoryItem(payment: {
   amount: number | string | { toString(): string }
   direction: 'IN' | 'OUT'
   movementType: string
+  paymentMode: 'CASH' | 'CHEQUE' | 'BANK_TRANSFER' | 'UPI' | null
+  referenceNumber: string | null
   note: string | null
   postedAt: Date
 }) {
@@ -201,6 +203,8 @@ export function mapCustomerPaymentHistoryItem(payment: {
     amount: Number(payment.amount),
     direction: payment.direction,
     movementType: payment.movementType,
+    paymentMode: payment.paymentMode,
+    referenceNumber: payment.referenceNumber,
     note: payment.note,
     createdAt: payment.postedAt,
   }

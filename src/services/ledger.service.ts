@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { Prisma, type Direction, type MovementType, type Payment, type WalletType } from '@prisma/client'
+import { Prisma, type Direction, type MovementType, type Payment, type PaymentMode, type WalletType } from '@prisma/client'
 
 export type LedgerErrorCode =
   | 'INSUFFICIENT_FUNDS'
@@ -27,6 +27,8 @@ type CreateLedgerEntryInput = {
   idempotencyKey: string
   postedAt?: Date
   note?: string
+  paymentMode?: PaymentMode
+  referenceNumber?: string
   customerId?: string
   expenseId?: string
   investorTransactionId?: string
@@ -75,6 +77,8 @@ function isMatchingIdempotentPayload(existing: Payment, input: CreateLedgerEntry
   if (existing.direction !== input.direction) return false
   if (existing.movementType !== input.movementType) return false
   if (!getNormalizedAmount(existing.amount).equals(input.amount)) return false
+  if ((existing.paymentMode ?? null) !== (input.paymentMode ?? null)) return false
+  if ((existing.referenceNumber ?? null) !== (input.referenceNumber ?? null)) return false
   if ((existing.note ?? null) !== note) return false
   if ((existing.customerId ?? null) !== (input.customerId ?? null)) return false
   if ((existing.expenseId ?? null) !== (input.expenseId ?? null)) return false
@@ -417,6 +421,8 @@ export async function createLedgerEntry(
       amount: input.amount,
       idempotencyKey: input.idempotencyKey,
       postedAt: input.postedAt,
+      paymentMode: input.paymentMode ?? null,
+      referenceNumber: input.referenceNumber ?? null,
       note: input.note ?? null,
       customerId: input.customerId ?? null,
       expenseId: input.expenseId ?? null,
