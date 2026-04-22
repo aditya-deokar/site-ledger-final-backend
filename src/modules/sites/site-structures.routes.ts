@@ -2,19 +2,25 @@ import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi'
 import type { AuthContext } from '../../types/auth.js'
 import { jsonError, jsonOk } from '../../utils/response.js'
 import {
+  createWingSchema,
   createFlatSchema,
   createFloorSchema,
   errorResponseSchema,
+  updateWingSchema,
   updateFlatDetailsSchema,
   updateFlatSchema,
   updateFloorSchema,
 } from './sites.schema.js'
 import {
   createFlatForUser,
-  createFloorForUser,
+  createFloorInWingForUser,
+  createWingForUser,
+  deleteWingForUser,
+  getWingsForUser,
   deleteFlatForUser,
   deleteFloorForUser,
   getFloorsForUser,
+  updateWingForUser,
   updateFlatDetailsForUser,
   updateFlatForUser,
   updateFloorForUser,
@@ -46,6 +52,7 @@ export function registerSiteStructureRoutes(siteRoutes: SiteRouteApp) {
                   id: z.string(),
                   floorNumber: z.number(),
                   floorName: z.string(),
+                  wingId: z.string().nullable(),
                 }),
               }),
             }),
@@ -67,8 +74,9 @@ export function registerSiteStructureRoutes(siteRoutes: SiteRouteApp) {
     const parsed = createFloorSchema.safeParse(body)
     if (!parsed.success) return jsonError(c, 'Invalid request body', 400) as any
 
-    const floor = await createFloorForUser(id, auth.userId, parsed.data.floorName)
+    const floor = await createFloorInWingForUser(id, auth.userId, parsed.data)
     if (!floor) return jsonError(c, 'Site not found', 404) as any
+    if ('error' in floor) return jsonError(c, floor.error, floor.status) as any
 
     return jsonOk(
       c,
@@ -77,6 +85,7 @@ export function registerSiteStructureRoutes(siteRoutes: SiteRouteApp) {
           id: floor.id,
           floorNumber: floor.floorNumber,
           floorName: floor.floorName,
+          wingId: floor.wingId,
         },
       },
       201,
@@ -172,6 +181,8 @@ export function registerSiteStructureRoutes(siteRoutes: SiteRouteApp) {
                     id: z.string(),
                     floorNumber: z.number(),
                     floorName: z.string().nullable(),
+                    wingId: z.string().nullable(),
+                    wingName: z.string().nullable(),
                     flats: z.array(
                       z.object({
                         id: z.string(),
@@ -219,6 +230,218 @@ export function registerSiteStructureRoutes(siteRoutes: SiteRouteApp) {
     return jsonOk(c, responseData) as any
   })
 
+  const listWingsRoute = createRoute({
+    method: 'get',
+    path: '/{id}/wings',
+    tags: ['Floors & Flats'],
+    summary: 'List wings for a site',
+    security: [{ bearerAuth: [] }],
+    request: {
+      params: z.object({ id: z.string() }),
+    },
+    responses: {
+      200: {
+        content: {
+          'application/json': {
+            schema: z.object({
+              ok: z.literal(true),
+              data: z.object({
+                wings: z.array(
+                  z.object({
+                    id: z.string(),
+                    siteId: z.string(),
+                    name: z.string(),
+                    code: z.string().nullable(),
+                    isActive: z.boolean(),
+                    floorsCount: z.number(),
+                    createdAt: z.string().datetime(),
+                    updatedAt: z.string().datetime(),
+                  }),
+                ),
+              }),
+            }),
+          },
+        },
+        description: 'Wing list',
+      },
+      404: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Site not found',
+      },
+    },
+  })
+
+  siteRoutes.openapi(listWingsRoute, async (c) => {
+    const auth = c.get('auth')
+    const { id } = c.req.valid('param')
+
+    const responseData = await getWingsForUser(id, auth.userId)
+    if (!responseData) return jsonError(c, 'Site not found', 404) as any
+
+    return jsonOk(c, responseData) as any
+  })
+
+  const createWingRoute = createRoute({
+    method: 'post',
+    path: '/{id}/wings',
+    tags: ['Floors & Flats'],
+    summary: 'Create a wing for a site',
+    security: [{ bearerAuth: [] }],
+    request: {
+      params: z.object({ id: z.string() }),
+      body: {
+        content: { 'application/json': { schema: createWingSchema } },
+      },
+    },
+    responses: {
+      201: {
+        content: {
+          'application/json': {
+            schema: z.object({
+              ok: z.literal(true),
+              data: z.object({
+                wing: z.object({
+                  id: z.string(),
+                  siteId: z.string(),
+                  name: z.string(),
+                  code: z.string().nullable(),
+                  isActive: z.boolean(),
+                }),
+              }),
+            }),
+          },
+        },
+        description: 'Wing created',
+      },
+      400: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Bad request',
+      },
+      404: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Site not found',
+      },
+    },
+  })
+
+  siteRoutes.openapi(createWingRoute, async (c) => {
+    const auth = c.get('auth')
+    const { id } = c.req.valid('param')
+    const body = await c.req.json().catch(() => null)
+    const parsed = createWingSchema.safeParse(body)
+    if (!parsed.success) return jsonError(c, 'Invalid request body', 400) as any
+
+    const wing = await createWingForUser(id, auth.userId, parsed.data)
+    if (!wing) return jsonError(c, 'Site not found', 404) as any
+    if ('error' in wing) return jsonError(c, wing.error, wing.status) as any
+
+    return jsonOk(c, { wing }, 201) as any
+  })
+
+  const updateWingRoute = createRoute({
+    method: 'patch',
+    path: '/{id}/wings/{wingId}',
+    tags: ['Floors & Flats'],
+    summary: 'Update wing details',
+    security: [{ bearerAuth: [] }],
+    request: {
+      params: z.object({ id: z.string(), wingId: z.string() }),
+      body: {
+        content: { 'application/json': { schema: updateWingSchema } },
+      },
+    },
+    responses: {
+      200: {
+        content: {
+          'application/json': {
+            schema: z.object({
+              ok: z.literal(true),
+              data: z.object({
+                wing: z.object({
+                  id: z.string(),
+                  siteId: z.string(),
+                  name: z.string(),
+                  code: z.string().nullable(),
+                  isActive: z.boolean(),
+                }),
+              }),
+            }),
+          },
+        },
+        description: 'Wing updated',
+      },
+      400: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Bad request',
+      },
+      404: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Wing not found',
+      },
+    },
+  })
+
+  siteRoutes.openapi(updateWingRoute, async (c) => {
+    const auth = c.get('auth')
+    const { id, wingId } = c.req.valid('param')
+    const body = await c.req.json().catch(() => null)
+    const parsed = updateWingSchema.safeParse(body)
+    if (!parsed.success) return jsonError(c, 'Invalid request body', 400) as any
+
+    const wing = await updateWingForUser(id, wingId, auth.userId, parsed.data)
+    if (!wing) return jsonError(c, 'Site not found', 404) as any
+    if ('error' in wing) return jsonError(c, wing.error, wing.status) as any
+
+    return jsonOk(c, { wing }) as any
+  })
+
+  const deleteWingRoute = createRoute({
+    method: 'delete',
+    path: '/{id}/wings/{wingId}',
+    tags: ['Floors & Flats'],
+    summary: 'Delete a wing',
+    security: [{ bearerAuth: [] }],
+    request: {
+      params: z.object({ id: z.string(), wingId: z.string() }),
+    },
+    responses: {
+      200: {
+        content: {
+          'application/json': {
+            schema: z.object({
+              ok: z.literal(true),
+              data: z.object({
+                deletedWingId: z.string(),
+              }),
+            }),
+          },
+        },
+        description: 'Wing deleted',
+      },
+      400: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Cannot delete wing',
+      },
+      404: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Wing not found',
+      },
+    },
+  })
+
+  siteRoutes.openapi(deleteWingRoute, async (c) => {
+    const auth = c.get('auth')
+    const { id, wingId } = c.req.valid('param')
+
+    const deleted = await deleteWingForUser(id, wingId, auth.userId)
+    if (!deleted) return jsonError(c, 'Site not found', 404) as any
+    if ('error' in deleted) return jsonError(c, deleted.error ?? 'Could not delete wing', deleted.status) as any
+
+    return jsonOk(c, {
+      deletedWingId: deleted.id,
+    }) as any
+  })
+
   const updateFloorRoute = createRoute({
     method: 'patch',
     path: '/{id}/floors/{floorId}',
@@ -243,6 +466,7 @@ export function registerSiteStructureRoutes(siteRoutes: SiteRouteApp) {
                   id: z.string(),
                   floorNumber: z.number(),
                   floorName: z.string().nullable(),
+                  wingId: z.string().nullable(),
                 }),
               }),
             }),
@@ -277,6 +501,7 @@ export function registerSiteStructureRoutes(siteRoutes: SiteRouteApp) {
         id: updated.id,
         floorNumber: updated.floorNumber,
         floorName: updated.floorName,
+        wingId: updated.wingId,
       },
     }) as any
   })

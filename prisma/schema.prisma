@@ -84,9 +84,24 @@ model Site {
   customers   Customer[]
   expenses    Expense[]
   floors      Floor[]
+  wings       Wing[]
   investors   Investor[]
   payments    Payment[]
   company     Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+model Wing {
+  id        String   @id @default(cuid())
+  siteId    String
+  name      String
+  code      String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  floors    Floor[]
+  site      Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([siteId, createdAt])
 }
 
 model Vendor {
@@ -121,11 +136,15 @@ model Expense {
 model Floor {
   id          String   @id @default(cuid())
   siteId      String
+  wingId      String?
   floorNumber Int
   createdAt   DateTime @default(now())
   floorName   String?
   flats       Flat[]
+  wing        Wing?    @relation(fields: [wingId], references: [id], onDelete: SetNull)
   site        Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([wingId, floorNumber])
 }
 
 model Flat {

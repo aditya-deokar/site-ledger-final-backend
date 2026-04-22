@@ -1,13 +1,38 @@
 import { z } from '@hono/zod-openapi'
 
+export const createSiteWingSchema = z.object({
+  name: z.string().trim().min(1),
+  floorCount: z.number().int().min(1),
+})
+
 export const createSiteSchema = z.object({
   name: z.string().min(1),
   address: z.string().min(1),
   projectType: z.enum(['NEW_CONSTRUCTION', 'REDEVELOPMENT']).optional().default('NEW_CONSTRUCTION'),
   totalFloors: z.number().int().min(1).optional(),
   totalFlats: z.number().int().min(1).optional(),
+  hasMultipleWings: z.boolean().optional().default(false),
+  wings: z.array(createSiteWingSchema).optional(),
 }).superRefine((data, ctx) => {
-  if (data.totalFlats && !data.totalFloors) {
+  const hasConfiguredWings = (data.wings?.length ?? 0) > 0
+
+  if (hasConfiguredWings && data.hasMultipleWings === false) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['hasMultipleWings'],
+      message: 'Enable multiple wings when wing details are provided.',
+    })
+  }
+
+  if (data.hasMultipleWings && !hasConfiguredWings) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['wings'],
+      message: 'Add at least one wing when multiple wings is enabled.',
+    })
+  }
+
+  if (!hasConfiguredWings && data.totalFlats && !data.totalFloors) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['totalFloors'],
@@ -18,10 +43,20 @@ export const createSiteSchema = z.object({
 
 export const createFloorSchema = z.object({
   floorName: z.string().min(1),
+  wingId: z.string().optional(),
 })
 
 export const updateFloorSchema = z.object({
   floorName: z.string().min(1),
+  wingId: z.string().optional(),
+})
+
+export const createWingSchema = z.object({
+  name: z.string().trim().min(1),
+})
+
+export const updateWingSchema = z.object({
+  name: z.string().trim().min(1),
 })
 
 export const createFlatSchema = z.object({
@@ -33,6 +68,7 @@ export const createFlatSchema = z.object({
 export const updateFlatDetailsSchema = z.object({
   customFlatId: z.string().min(1),
   unitType: z.string().trim().min(1).optional(),
+  floorId: z.string().min(1).optional(),
   flatType: z.enum(['CUSTOMER', 'EXISTING_OWNER']).optional().default('CUSTOMER'),
 })
 

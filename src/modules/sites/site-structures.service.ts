@@ -24,8 +24,9 @@ export async function createFloorForUser(siteId: string, userId: string, floorNa
   const { company, site } = await getSiteForUser(siteId, userId)
   if (!company || !site) return null
 
+  const trimmedName = floorName.trim()
   const lastFloor = await prisma.floor.findFirst({
-    where: { siteId: site.id },
+    where: { siteId: site.id, wingId: null },
     orderBy: { floorNumber: 'desc' },
   })
   const nextFloorNumber = (lastFloor?.floorNumber ?? 0) + 1
@@ -34,7 +35,8 @@ export async function createFloorForUser(siteId: string, userId: string, floorNa
     data: {
       siteId: site.id,
       floorNumber: nextFloorNumber,
-      floorName,
+      floorName: trimmedName,
+      wingId: null,
     },
   })
 
@@ -47,6 +49,178 @@ export async function createFloorForUser(siteId: string, userId: string, floorNa
   await invalidateSiteListCaches(company.id)
 
   return floor
+}
+
+export async function createFloorInWingForUser(
+  siteId: string,
+  userId: string,
+  data: { floorName: string; wingId?: string },
+) {
+  const { company, site } = await getSiteForUser(siteId, userId)
+  if (!company || !site) return null
+
+  const requestedWingId = data.wingId?.trim() || null
+  if (requestedWingId) {
+    const wing = await prisma.wing.findFirst({
+      where: { id: requestedWingId, siteId: site.id },
+    })
+    if (!wing) return { error: 'Wing not found', status: 404 as const }
+  }
+
+  const lastFloor = await prisma.floor.findFirst({
+    where: {
+      siteId: site.id,
+      wingId: requestedWingId,
+    },
+    orderBy: { floorNumber: 'desc' },
+  })
+  const nextFloorNumber = (lastFloor?.floorNumber ?? 0) + 1
+
+  const floor = await prisma.floor.create({
+    data: {
+      siteId: site.id,
+      floorNumber: nextFloorNumber,
+      floorName: data.floorName.trim(),
+      wingId: requestedWingId,
+    },
+  })
+
+  await prisma.site.update({
+    where: { id: site.id },
+    data: { totalFloors: { increment: 1 } },
+  })
+
+  await cacheService.del(CacheKeys.siteFloors(site.id))
+  await invalidateSiteListCaches(company.id)
+
+  return floor
+}
+
+export async function getWingsForUser(siteId: string, userId: string) {
+  const { site } = await getSiteForUser(siteId, userId)
+  if (!site) return null
+
+  const wings = await prisma.wing.findMany({
+    where: { siteId: site.id },
+    include: {
+      _count: {
+        select: { floors: true },
+      },
+    },
+    orderBy: [{ createdAt: 'asc' }, { name: 'asc' }],
+  })
+
+  return {
+    wings: wings.map((wing) => ({
+      id: wing.id,
+      siteId: wing.siteId,
+      name: wing.name,
+      code: wing.code,
+      isActive: wing.isActive,
+      floorsCount: wing._count.floors,
+      createdAt: wing.createdAt.toISOString(),
+      updatedAt: wing.updatedAt.toISOString(),
+    })),
+  }
+}
+
+export async function createWingForUser(siteId: string, userId: string, data: { name: string }) {
+  const { company, site } = await getSiteForUser(siteId, userId)
+  if (!company || !site) return null
+
+  const trimmedName = data.name.trim()
+  const duplicate = await prisma.wing.findFirst({
+    where: {
+      siteId: site.id,
+      name: { equals: trimmedName, mode: 'insensitive' },
+    },
+  })
+  if (duplicate) return { error: 'Wing name already exists for this site', status: 400 as const }
+
+  const wingsCount = await prisma.wing.count({ where: { siteId: site.id } })
+  const code = String.fromCharCode(65 + (wingsCount % 26))
+  const wing = await prisma.wing.create({
+    data: {
+      siteId: site.id,
+      name: trimmedName,
+      code,
+      isActive: true,
+    },
+  })
+
+  await cacheService.del(CacheKeys.siteFloors(site.id))
+  await cacheService.del(CacheKeys.siteDetail(site.id))
+  await invalidateSiteListCaches(company.id)
+
+  return wing
+}
+
+export async function updateWingForUser(
+  siteId: string,
+  wingId: string,
+  userId: string,
+  data: { name: string },
+) {
+  const { company, site } = await getSiteForUser(siteId, userId)
+  if (!company || !site) return null
+
+  const wing = await prisma.wing.findFirst({
+    where: { id: wingId, siteId: site.id },
+  })
+  if (!wing) return { error: 'Wing not found', status: 404 as const }
+
+  const trimmedName = data.name.trim()
+  const duplicate = await prisma.wing.findFirst({
+    where: {
+      siteId: site.id,
+      id: { not: wing.id },
+      name: { equals: trimmedName, mode: 'insensitive' },
+    },
+  })
+  if (duplicate) return { error: 'Wing name already exists for this site', status: 400 as const }
+
+  const updated = await prisma.wing.update({
+    where: { id: wing.id },
+    data: { name: trimmedName },
+  })
+
+  await cacheService.del(CacheKeys.siteFloors(site.id))
+  await cacheService.del(CacheKeys.siteDetail(site.id))
+  await invalidateSiteListCaches(company.id)
+
+  return updated
+}
+
+export async function deleteWingForUser(siteId: string, wingId: string, userId: string) {
+  const { company, site } = await getSiteForUser(siteId, userId)
+  if (!company || !site) return null
+
+  const wing = await prisma.wing.findFirst({
+    where: { id: wingId, siteId: site.id },
+    include: {
+      _count: {
+        select: { floors: true },
+      },
+    },
+  })
+  if (!wing) return { error: 'Wing not found', status: 404 as const }
+
+  if (wing._count.floors > 0) {
+    return {
+      error: 'Cannot delete this wing because it still has floors',
+      status: 400 as const,
+    }
+  }
+
+  await prisma.wing.delete({
+    where: { id: wing.id },
+  })
+
+  await cacheService.del(CacheKeys.siteFloors(site.id))
+  await cacheService.del(CacheKeys.siteDetail(site.id))
+  await invalidateSiteListCaches(company.id)
+
+  return { id: wing.id }
 }
 
 export async function createFlatForUser(
@@ -104,6 +278,12 @@ export async function getFloorsForUser(siteId: string, userId: string) {
   const floors = await prisma.floor.findMany({
     where: { siteId: site.id },
     include: {
+      wing: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
       flats: {
         include: {
           customer: {
@@ -117,7 +297,7 @@ export async function getFloorsForUser(siteId: string, userId: string) {
         orderBy: { flatNumber: 'asc' },
       },
     },
-    orderBy: { floorNumber: 'asc' },
+    orderBy: [{ createdAt: 'asc' }, { floorNumber: 'asc' }],
   })
 
   const responseData = {
@@ -125,6 +305,8 @@ export async function getFloorsForUser(siteId: string, userId: string) {
       id: floor.id,
       floorNumber: floor.floorNumber,
       floorName: floor.floorName,
+      wingId: floor.wingId,
+      wingName: floor.wing?.name ?? null,
       flats: floor.flats.map((flat) => ({
         id: flat.id,
         flatNumber: flat.flatNumber,
@@ -189,7 +371,7 @@ export async function updateFloorForUser(
   siteId: string,
   floorId: string,
   userId: string,
-  data: { floorName: string },
+  data: { floorName: string; wingId?: string },
 ) {
   const { company, site } = await getSiteForUser(siteId, userId)
   if (!company || !site) return null
@@ -199,9 +381,31 @@ export async function updateFloorForUser(
   })
   if (!floor) return { error: 'Floor not found', status: 404 as const }
 
+  const requestedWingId = data.wingId?.trim() || null
+  if (requestedWingId) {
+    const wing = await prisma.wing.findFirst({
+      where: { id: requestedWingId, siteId: site.id },
+    })
+    if (!wing) return { error: 'Wing not found', status: 404 as const }
+  }
+
+  const shouldReindexFloorNumber = floor.wingId !== requestedWingId
+  const nextFloorNumber = shouldReindexFloorNumber
+    ? (await prisma.floor.count({
+        where: {
+          siteId: site.id,
+          wingId: requestedWingId,
+        },
+      })) + 1
+    : floor.floorNumber
+
   const updated = await prisma.floor.update({
     where: { id: floor.id },
-    data: { floorName: data.floorName },
+    data: {
+      floorName: data.floorName,
+      wingId: requestedWingId,
+      floorNumber: nextFloorNumber,
+    },
   })
 
   await cacheService.del(CacheKeys.siteFloors(site.id))
@@ -248,7 +452,7 @@ export async function updateFlatDetailsForUser(
   siteId: string,
   flatId: string,
   userId: string,
-  data: { customFlatId: string; unitType?: string; flatType?: 'CUSTOMER' | 'EXISTING_OWNER' },
+  data: { customFlatId: string; unitType?: string; floorId?: string; flatType?: 'CUSTOMER' | 'EXISTING_OWNER' },
 ) {
   const { company, site } = await getSiteForUser(siteId, userId)
   if (!company || !site) return null
@@ -272,18 +476,28 @@ export async function updateFlatDetailsForUser(
   })
   if (existing) return { error: 'Flat ID already exists in this site', status: 400 as const }
 
-  const canChangeFlatType = !flat.customer && flat.status === 'AVAILABLE'
+  let nextFloorId = flat.floorId
+
+  if (data.floorId && data.floorId !== flat.floorId) {
+    const targetFloor = await prisma.floor.findFirst({
+      where: { id: data.floorId, siteId: site.id },
+      select: { id: true },
+    })
+
+    if (!targetFloor) return { error: 'Target floor not found', status: 404 as const }
+    nextFloorId = targetFloor.id
+  }
+
   const requestedFlatType = data.flatType ?? flat.flatType ?? 'CUSTOMER'
-  const flatType = canChangeFlatType
-    ? site.projectType === 'NEW_CONSTRUCTION'
-      ? 'CUSTOMER'
-      : requestedFlatType
-    : flat.flatType
+  const flatType = site.projectType === 'NEW_CONSTRUCTION'
+    ? 'CUSTOMER'
+    : requestedFlatType
 
   const updated = await prisma.flat.update({
     where: { id: flat.id },
     data: {
       customFlatId: data.customFlatId,
+      floorId: nextFloorId,
       unitType: data.unitType?.trim() || flat.unitType,
       flatType,
     },

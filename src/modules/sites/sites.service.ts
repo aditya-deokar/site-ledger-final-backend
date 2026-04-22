@@ -35,6 +35,20 @@ function chunkItems<T>(items: T[], chunkSize: number) {
   return chunks
 }
 
+function getDefaultFloorName(floorIndex: number) {
+  if (floorIndex === 0) return 'Ground Floor'
+  return `Floor ${floorIndex}`
+}
+
+function getDefaultWingCode(wingName: string, wingIndex: number) {
+  const trimmed = wingName.trim()
+  if (trimmed.length > 0) {
+    return trimmed.slice(0, 4).toUpperCase()
+  }
+
+  return String.fromCharCode(65 + (wingIndex % 26))
+}
+
 export async function createSiteForUser(
   userId: string,
   data: {
@@ -43,22 +57,66 @@ export async function createSiteForUser(
     projectType: 'NEW_CONSTRUCTION' | 'REDEVELOPMENT'
     totalFloors?: number
     totalFlats?: number
+    hasMultipleWings?: boolean
+    wings?: Array<{
+      name: string
+      floorCount: number
+    }>
   },
 ) {
   const company = await getCompanyForUser(userId)
   if (!company) return null
 
   const slug = await generateUniqueSlug(data.name)
-  const totalFloors = data.totalFloors ?? 0
+  const requestedWings = data.hasMultipleWings ? data.wings ?? [] : []
+  const configuredWings = requestedWings
+    .map((wing) => ({
+      name: wing.name.trim(),
+      floorCount: wing.floorCount,
+    }))
+    .filter((wing) => wing.name.length > 0 && wing.floorCount > 0)
+  const hasWings = configuredWings.length > 0
+  const wingDelegate = (prisma as unknown as { wing?: { createMany?: (...args: unknown[]) => unknown } }).wing
+
+  if (hasWings && typeof wingDelegate?.createMany !== 'function') {
+    throw new Error('Wing model is unavailable in Prisma client. Run `npx prisma generate` and restart the backend server.')
+  }
+
+  const totalFloors = hasWings
+    ? configuredWings.reduce((sum, wing) => sum + wing.floorCount, 0)
+    : data.totalFloors ?? 0
   const totalFlats = data.totalFlats ?? 0
   const flatDistribution = distributeFlatsAcrossFloors(totalFloors, totalFlats)
   const siteId = randomUUID()
-  const floorRecords = Array.from({ length: totalFloors }, (_, floorIndex) => ({
+  const wingRecords = configuredWings.map((wing, wingIndex) => ({
     id: randomUUID(),
     siteId,
-    floorNumber: floorIndex + 1,
-    floorName: null as string | null,
+    name: wing.name,
+    code: getDefaultWingCode(wing.name, wingIndex),
+    isActive: true,
   }))
+
+  const floorRecords = hasWings
+    ? wingRecords.flatMap((wingRecord, wingIndex) => {
+        const wing = configuredWings[wingIndex]
+        if (!wing) return []
+
+        return Array.from({ length: wing.floorCount }, (_, floorIndex) => ({
+          id: randomUUID(),
+          siteId,
+          wingId: wingRecord.id,
+          floorNumber: floorIndex + 1,
+          floorName: getDefaultFloorName(floorIndex),
+        }))
+      })
+    : Array.from({ length: totalFloors }, (_, floorIndex) => ({
+        id: randomUUID(),
+        siteId,
+        wingId: null as string | null,
+        floorNumber: floorIndex + 1,
+        floorName: null as string | null,
+      }))
+
   const flatRecords = floorRecords.flatMap((floor, floorIndex) => {
     const flatsForFloor = flatDistribution[floorIndex] ?? 0
 
@@ -87,6 +145,13 @@ export async function createSiteForUser(
         totalFlats,
       },
     }),
+    ...(wingRecords.length
+      ? [
+          prisma.wing.createMany({
+            data: wingRecords,
+          }),
+        ]
+      : []),
     ...(floorRecords.length
       ? [
           prisma.floor.createMany({
