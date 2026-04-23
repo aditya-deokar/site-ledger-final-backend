@@ -15,6 +15,7 @@ import { attendanceRoutes } from './routes/attendance.js'
 import { employeeTransactionRoutes } from './routes/transactions.js'
 import { salaryReminderRoutes } from './routes/reminders.js'
 import { employeeDocumentRoutes } from './routes/documents.js'
+import { salaryPaymentRoutes } from './modules/employees/salary-payment.routes.js'
 import { LedgerError } from './services/ledger.service.js'
 import { jsonError } from './utils/response.js'
 import { requestId } from './middlewares/request-id.js'
@@ -114,10 +115,11 @@ app.route('/api/vendors', vendorRoutes)
 app.route('/api/sites', customerRoutes)
 app.route('/api/customers', customerRoutes)
 app.route('/api/investors', investorRoutes)
+app.route('/api/employees/salary-reminders', salaryReminderRoutes)
 app.route('/api/employees', employeeRoutes)
+app.route('/api/employees', salaryPaymentRoutes)
 app.route('/api/attendance', attendanceRoutes)
 app.route('/api/transactions', employeeTransactionRoutes)
-app.route('/api/reminders', salaryReminderRoutes)
 app.route('/api/documents', employeeDocumentRoutes)
 
 app.notFound((c: Context) => jsonError(c, 'Not Found', 404))

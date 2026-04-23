@@ -3,6 +3,7 @@ import type { AuthContext } from '../../types/auth.js'
 import { requireJwt } from '../../middlewares/jwt.js'
 import { jsonError, jsonOk } from '../../utils/response.js'
 import {
+  employeeTransactionResponseSchema,
   errorResponseSchema,
   generateSalaryRemindersSchema,
   markReminderPaidSchema,
@@ -124,11 +125,17 @@ const markReminderPaidRoute = createRoute({
             ok: z.literal(true),
             data: z.object({
               reminder: salaryReminderResponseSchema,
+              transaction: employeeTransactionResponseSchema,
+              availableFund: z.number(),
             }),
           }),
         },
       },
       description: 'Reminder marked as paid',
+    },
+    400: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: 'Reminder already paid or company has insufficient funds',
     },
     404: {
       content: { 'application/json': { schema: errorResponseSchema } },

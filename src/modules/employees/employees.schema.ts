@@ -18,6 +18,7 @@ export const createEmployeeSchema = z.object({
   department: z.string().trim().min(1),
   dateOfJoining: z.coerce.date(),
   salary: z.number().nonnegative(),
+  salaryDate: z.number().int().min(1).max(31).optional(),
   status: employeeStatusSchema.optional(),
 })
 
@@ -32,7 +33,17 @@ export const updateEmployeeSchema = z.object({
   department: z.string().trim().min(1).optional(),
   dateOfJoining: z.coerce.date().optional(),
   salary: z.number().nonnegative().optional(),
+  salaryDate: z.number().int().min(1).max(31).nullable().optional(),
   status: employeeStatusSchema.optional(),
+})
+
+export const paySalarySchema = z.object({
+  amount: z.number().positive(),
+  paymentMethod: employeePaymentMethodSchema.optional(),
+  note: z.string().trim().optional(),
+  month: z.number().int().min(1).max(12).optional(),
+  year: z.number().int().min(2000).max(2100).optional(),
+  paidAt: z.coerce.date().optional(),
 })
 
 export const employeeListQuerySchema = z.object({
@@ -115,6 +126,7 @@ export const employeeResponseSchema = z.object({
   department: z.string(),
   dateOfJoining: z.string().datetime(),
   salary: z.number(),
+  salaryDate: z.number().int().nullable(),
   status: employeeStatusSchema,
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -170,6 +182,7 @@ export const employeeTransactionResponseSchema = z.object({
 export const salaryReminderResponseSchema = z.object({
   id: z.string(),
   employeeId: z.string(),
+  employeeName: z.string(),
   month: z.number().int(),
   year: z.number().int(),
   salaryAmount: z.number(),

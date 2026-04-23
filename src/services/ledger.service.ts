@@ -243,6 +243,10 @@ function validateMovementCombination(input: CreateLedgerEntryInput) {
         'INVALID_LEDGER_INPUT',
       )
       return
+    case 'SALARY_PAYMENT':
+      assertLedger(input.walletType === 'COMPANY' && input.direction === 'OUT', 'INVALID_LEDGER_INPUT')
+      assertLedger(entityRefCount === 0, 'INVALID_LEDGER_INPUT')
+      return
     case 'REVERSAL':
     case 'ADJUSTMENT':
       return

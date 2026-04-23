@@ -123,6 +123,7 @@ export async function createEmployeeForUser(userId: string, data: CreateEmployee
     department: data.department,
     dateOfJoining: data.dateOfJoining,
     salary: data.salary,
+    salaryDate: data.salaryDate ?? null,
     status: employeeStatusToDb(data.status ?? 'active'),
   })
 
@@ -205,6 +206,7 @@ export async function updateEmployeeForUser(
         ...(data.department !== undefined ? { department: data.department } : {}),
         ...(data.dateOfJoining !== undefined ? { dateOfJoining: data.dateOfJoining } : {}),
         ...(data.salary !== undefined ? { salary: data.salary } : {}),
+        ...(data.salaryDate !== undefined ? { salaryDate: data.salaryDate } : {}),
         ...(data.status !== undefined ? { status: employeeStatusToDb(data.status) } : {}),
       },
     })

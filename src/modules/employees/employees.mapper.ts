@@ -167,6 +167,7 @@ export function mapEmployee(employee: Employee) {
     department: employee.department,
     dateOfJoining: employee.dateOfJoining.toISOString(),
     salary: employee.salary,
+    salaryDate: employee.salaryDate ?? null,
     status: employeeStatusFromDb(employee.status),
     createdAt: employee.createdAt.toISOString(),
     updatedAt: employee.updatedAt.toISOString(),
@@ -215,7 +216,7 @@ export function mapEmployeeTransaction(transaction: EmployeeTransaction) {
 }
 
 export function mapSalaryReminder(
-  reminder: SalaryReminder,
+  reminder: SalaryReminder & { employee?: { name: string } | null },
   statusOverride?: SalaryReminderStatus,
 ) {
   const status = statusOverride ?? reminder.status
@@ -223,6 +224,7 @@ export function mapSalaryReminder(
   return {
     id: reminder.id,
     employeeId: reminder.employeeId,
+    employeeName: reminder.employee?.name ?? '',
     month: reminder.month,
     year: reminder.year,
     salaryAmount: reminder.salaryAmount,
