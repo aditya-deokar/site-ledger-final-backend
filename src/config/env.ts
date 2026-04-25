@@ -7,6 +7,7 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(5000),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
+  CORS_ORIGINS: z.string().optional(),
 
   // Redis
   REDIS_HOST: z.string().default('localhost'),

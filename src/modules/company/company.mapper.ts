@@ -42,7 +42,7 @@ export function mapCompanyWithdrawalResponse(
     amount: number
     note: string | null
     createdAt: Date
-    ledgerEntries: Array<{ amount: number | string | { toString(): string }; postedAt: Date }>
+    ledgerEntries: Array<{ amount: number | string | { toString(): string }; direction: 'IN' | 'OUT'; postedAt: Date }>
   },
 ) {
   const derived = mapCompanyWithdrawalLedgerFields(withdrawal.amount, withdrawal.ledgerEntries)
@@ -64,6 +64,7 @@ export function mapCompanyActivity(payment: {
   amount: Prisma.Decimal | number | string
   note: string | null
   postedAt: Date
+  direction: 'IN' | 'OUT'
   companyWithdrawalId: string | null
   walletType: string
   movementType: string
@@ -85,12 +86,15 @@ export function mapCompanyActivity(payment: {
         site: { name: string } | null
       }
     | null
+  reversalOfPaymentId?: string | null
 }) {
+  const signedAmount = payment.direction === 'IN' ? Number(payment.amount) : -Number(payment.amount)
+
   if (payment.companyWithdrawalId) {
     return {
       id: payment.id,
       type: 'withdrawal' as const,
-      amount: -Number(payment.amount),
+      amount: signedAmount,
       description: payment.note || payment.companyWithdrawal?.note || 'Company withdrawal',
       date: payment.postedAt.toISOString(),
     }
@@ -122,13 +126,15 @@ export function mapCompanyActivity(payment: {
     return {
       id: payment.id,
       type: 'investor_tx' as const,
-      amount: payment.movementType === 'INVESTOR_PRINCIPAL_IN' ? Number(payment.amount) : -Number(payment.amount),
+      amount: signedAmount,
       description:
-        payment.movementType === 'INVESTOR_PRINCIPAL_IN'
-          ? `${investorName} invested`
-          : payment.movementType === 'INVESTOR_INTEREST'
-            ? `Interest paid to ${investorName}`
-            : `Returned to ${investorName}`,
+        payment.movementType === 'REVERSAL'
+          ? `Investor payment reversed for ${investorName}`
+          : payment.movementType === 'INVESTOR_PRINCIPAL_IN'
+            ? `${investorName} invested`
+            : payment.movementType === 'INVESTOR_INTEREST'
+              ? `Interest paid to ${investorName}`
+              : `Returned to ${investorName}`,
       date: payment.postedAt.toISOString(),
     }
   }
@@ -146,7 +152,7 @@ export function mapCompanyActivity(payment: {
   return {
     id: payment.id,
     type: 'expense' as const,
-    amount: -Number(payment.amount),
+    amount: signedAmount,
     description: `${payment.expense?.description ?? 'Expense'} - ${payment.expense?.site?.name ?? 'site'}`,
     date: payment.postedAt.toISOString(),
   }

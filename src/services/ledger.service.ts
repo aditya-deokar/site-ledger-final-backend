@@ -35,6 +35,7 @@ type CreateLedgerEntryInput = {
   companyWithdrawalId?: string
   partnerId?: string
   entryGroupId?: string
+  reversalOfPaymentId?: string
 }
 
 type CreateTransferEntriesInput = {
@@ -85,6 +86,7 @@ function isMatchingIdempotentPayload(existing: Payment, input: CreateLedgerEntry
   if ((existing.investorTransactionId ?? null) !== (input.investorTransactionId ?? null)) return false
   if ((existing.companyWithdrawalId ?? null) !== (input.companyWithdrawalId ?? null)) return false
   if ((existing.partnerId ?? null) !== (input.partnerId ?? null)) return false
+  if ((existing.reversalOfPaymentId ?? null) !== (input.reversalOfPaymentId ?? null)) return false
 
   if (input.entryGroupId !== undefined && (existing.entryGroupId ?? null) !== input.entryGroupId) return false
   if (input.postedAt && existing.postedAt.getTime() !== input.postedAt.getTime()) return false
@@ -259,13 +261,15 @@ async function validateDocumentLimit(
   input: CreateLedgerEntryInput,
   tx: Prisma.TransactionClient,
 ) {
+  const skipAmountLimits = input.movementType === 'REVERSAL' || input.movementType === 'ADJUSTMENT'
+
   if (input.customerId) {
     const customer = await tx.customer.findFirst({
       where: {
         id: input.customerId,
         companyId: input.companyId,
         isDeleted: false,
-        dealStatus: 'ACTIVE',
+        ...(skipAmountLimits ? {} : { dealStatus: 'ACTIVE' }),
       },
       select: {
         sellingPrice: true,
@@ -275,6 +279,10 @@ async function validateDocumentLimit(
 
     assertLedger(Boolean(customer), 'INVALID_LEDGER_INPUT')
     assertLedger(customer!.siteId === input.siteId, 'INVALID_LEDGER_INPUT')
+
+    if (skipAmountLimits) {
+      return
+    }
 
     const incomingResult = await tx.payment.aggregate({
       where: {
@@ -318,6 +326,10 @@ async function validateDocumentLimit(
     assertLedger(Boolean(expense), 'INVALID_LEDGER_INPUT')
     assertLedger(expense!.siteId === input.siteId, 'INVALID_LEDGER_INPUT')
 
+    if (skipAmountLimits) {
+      return
+    }
+
     const paidTotal = await getDocumentPaidTotal('expenseId', input.expenseId, tx)
     assertLedger(paidTotal.plus(input.amount).lessThanOrEqualTo(expense!.amount), 'AMOUNT_EXCEEDS_LIMIT')
     return
@@ -350,6 +362,10 @@ async function validateDocumentLimit(
     assertLedger(expectedWalletType === input.walletType, 'INVALID_LEDGER_INPUT')
     assertLedger((transaction!.investor.siteId ?? null) === (input.siteId ?? null), 'INVALID_LEDGER_INPUT')
 
+    if (skipAmountLimits) {
+      return
+    }
+
     const expectedMovementType: MovementType = transaction!.kind === 'PRINCIPAL_IN'
       ? 'INVESTOR_PRINCIPAL_IN'
       : transaction!.kind === 'PRINCIPAL_OUT'
@@ -375,6 +391,10 @@ async function validateDocumentLimit(
     })
 
     assertLedger(Boolean(withdrawal), 'INVALID_LEDGER_INPUT')
+
+    if (skipAmountLimits) {
+      return
+    }
 
     const paidTotal = await getDocumentPaidTotal('companyWithdrawalId', input.companyWithdrawalId, tx)
     assertLedger(paidTotal.plus(input.amount).lessThanOrEqualTo(withdrawal!.amount), 'AMOUNT_EXCEEDS_LIMIT')
@@ -434,6 +454,7 @@ export async function createLedgerEntry(
       companyWithdrawalId: input.companyWithdrawalId ?? null,
       partnerId: input.partnerId ?? null,
       entryGroupId: input.entryGroupId ?? null,
+      reversalOfPaymentId: input.reversalOfPaymentId ?? null,
     },
   })
 }

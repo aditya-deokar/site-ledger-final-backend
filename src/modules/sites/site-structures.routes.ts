@@ -559,7 +559,7 @@ export function registerSiteStructureRoutes(siteRoutes: SiteRouteApp) {
     path: '/{id}/floors/{floorId}/flats/{flatId}',
     tags: ['Floors & Flats'],
     summary: 'Update flat status',
-    description: "Manually update a flat's status to AVAILABLE, BOOKED, or SOLD.",
+    description: "Reset an unassigned flat to AVAILABLE. BOOKED and SOLD are controlled by customer booking and payment ledgers.",
     security: [{ bearerAuth: [] }],
     request: {
       params: z.object({ id: z.string(), floorId: z.string(), flatId: z.string() }),

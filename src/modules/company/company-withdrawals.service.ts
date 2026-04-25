@@ -23,7 +23,7 @@ type CompanyWithdrawalWithLedger = {
   note: string | null
   createdAt: Date
   companyId: string
-  ledgerEntries: Array<{ amount: number | string | { toString(): string }; postedAt: Date }>
+  ledgerEntries: Array<{ amount: number | string | { toString(): string }; direction: 'IN' | 'OUT'; postedAt: Date }>
 }
 
 async function requireCompanyForUser(userId: string, message: string): Promise<CompanyRecord | CompanyServiceError> {
@@ -41,7 +41,7 @@ async function getCompanyWithdrawalForUser(withdrawalId: string, userId: string)
     where: { id: withdrawalId, companyId: company.id, isDeleted: false },
     include: {
       ledgerEntries: {
-        select: { amount: true, postedAt: true },
+        select: { amount: true, direction: true, postedAt: true },
         orderBy: { postedAt: 'desc' },
       },
     },
@@ -135,7 +135,7 @@ export async function getCompanyWithdrawalsForUser(userId: string) {
     where: { companyId: company.id, isDeleted: false },
     include: {
       ledgerEntries: {
-        select: { amount: true, postedAt: true },
+        select: { amount: true, direction: true, postedAt: true },
         orderBy: { postedAt: 'desc' },
       },
     },
@@ -227,12 +227,24 @@ export async function getCompanyWithdrawalPaymentsForUser(withdrawalId: string, 
       companyWithdrawalId: withdrawal.id,
     },
     orderBy: { postedAt: 'desc' },
+    select: {
+      id: true,
+      amount: true,
+      direction: true,
+      movementType: true,
+      note: true,
+      postedAt: true,
+      reversalOfPaymentId: true,
+    },
   })
 
   return {
     payments: payments.map((payment) => ({
       id: payment.id,
       amount: Number(payment.amount),
+      direction: payment.direction,
+      movementType: payment.movementType,
+      reversalOfPaymentId: payment.reversalOfPaymentId,
       note: payment.note,
       createdAt: payment.postedAt.toISOString(),
     })),

@@ -21,6 +21,7 @@ import {
   updateCustomerForUser,
 } from './customers.service.js'
 import { registerCustomerPaymentRoutes } from './customer-payments.routes.js'
+import { registerCustomerAgreementRoutes } from './customer-agreement.routes.js'
 
 export const customerRoutes = new OpenAPIHono<{ Variables: AuthContext['Variables'] }>()
 
@@ -413,3 +414,4 @@ customerRoutes.openapi(cancelBookingRoute, async (c) => {
 })
 
 registerCustomerPaymentRoutes(customerRoutes)
+registerCustomerAgreementRoutes(customerRoutes)

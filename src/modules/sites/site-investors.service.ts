@@ -20,7 +20,7 @@ export async function getSiteInvestorsForUser(siteId: string, userId: string) {
         select: {
           kind: true,
           ledgerEntries: {
-            select: { amount: true },
+            select: { amount: true, direction: true },
           },
         },
       },

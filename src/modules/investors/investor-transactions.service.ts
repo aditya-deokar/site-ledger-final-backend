@@ -1,6 +1,7 @@
 import { Prisma, type InvestorTransactionKind, type InvestorType } from '@prisma/client'
 import { prisma } from '../../db/prisma.js'
 import { createLedgerEntry } from '../../services/ledger.service.js'
+import { sumLedgerAmountsForDirection } from '../../services/ledger-read.service.js'
 import {
   deriveInvestorTransactionPaymentStatus,
   getInvestorLedgerSummary,
@@ -20,6 +21,7 @@ import {
   type InvestorTransactionView,
   type InvestorView,
 } from './investors.service.js'
+import { getSiteAgreementFinancials } from '../customers/customer-agreement.service.js'
 
 function resolveLedgerConfig(
   investor: { siteId: string | null },
@@ -75,15 +77,8 @@ async function getEquityProfitShareStatus(
   }
 
   const db = tx ?? prisma
-  const [revenueResult, expensesResult, summary, profitShareTransactions] = await Promise.all([
-    db.customer.aggregate({
-      where: {
-        siteId: investor.siteId,
-        isDeleted: false,
-        dealStatus: 'ACTIVE',
-      },
-      _sum: { sellingPrice: true },
-    }),
+  const [agreementFinancials, expensesResult, summary, profitShareTransactions] = await Promise.all([
+    getSiteAgreementFinancials(investor.siteId, db),
     db.expense.aggregate({
       where: { siteId: investor.siteId, isDeleted: false },
       _sum: { amount: true },
@@ -98,20 +93,20 @@ async function getEquityProfitShareStatus(
       select: {
         amount: true,
         ledgerEntries: {
-          select: { amount: true },
+          select: { amount: true, direction: true },
         },
       },
     }),
   ])
 
-  const siteProfit = Math.max(Number(revenueResult._sum.sellingPrice ?? 0) - Number(expensesResult._sum.amount ?? 0), 0)
+  const siteProfit = Math.max(Number(agreementFinancials.profitRevenue ?? 0) - Number(expensesResult._sum.amount ?? 0), 0)
   const estimatedShare = roundCurrencyAmount(((investor.equityPercentage ?? 0) / 100) * siteProfit)
   const recordedShare = roundCurrencyAmount(
     profitShareTransactions.reduce((sum, transaction) => sum + Number(transaction.amount), 0),
   )
   const pendingShare = roundCurrencyAmount(
     profitShareTransactions.reduce((sum, transaction) => {
-      const paid = transaction.ledgerEntries.reduce((paidTotal, entry) => paidTotal + Number(entry.amount), 0)
+      const paid = sumLedgerAmountsForDirection(transaction.ledgerEntries, 'OUT')
       return sum + Math.max(Number(transaction.amount) - paid, 0)
     }, 0),
   )
@@ -456,7 +451,17 @@ export async function getTransactionPaymentsForUser(
   investorId: string,
   transactionId: string,
   userId: string,
-): Promise<{ payments: Array<{ id: string; amount: number; note: string | null; createdAt: Date }> } | InvestorServiceError | null> {
+): Promise<{
+  payments: Array<{
+    id: string
+    amount: number
+    direction: 'IN' | 'OUT'
+    movementType: string
+    reversalOfPaymentId: string | null
+    note: string | null
+    createdAt: Date
+  }>
+} | InvestorServiceError | null> {
   const { investor, company } = await getInvestorForUser(investorId, userId)
   if (!investor || !company) return null
 
@@ -477,6 +482,9 @@ export async function getTransactionPaymentsForUser(
     payments: payments.map((payment) => ({
       id: payment.id,
       amount: Number(payment.amount),
+      direction: payment.direction,
+      movementType: payment.movementType,
+      reversalOfPaymentId: payment.reversalOfPaymentId,
       note: payment.note,
       createdAt: payment.postedAt,
     })),

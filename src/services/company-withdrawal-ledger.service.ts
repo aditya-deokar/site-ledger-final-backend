@@ -2,7 +2,7 @@ import { prisma } from '../db/prisma.js'
 import {
   derivePaymentStatus,
   getCompanyWithdrawalPaidTotal,
-  sumLedgerAmounts,
+  sumLedgerAmountsForDirection,
   type LedgerReadDb,
 } from './ledger-read.service.js'
 
@@ -35,9 +35,9 @@ export async function getCompanyWithdrawalRemaining(
 
 export function mapCompanyWithdrawalLedgerFields(
   amount: number,
-  ledgerEntries: Array<{ amount: number | string | { toString(): string }; postedAt: Date }>,
+  ledgerEntries: Array<{ amount: number | string | { toString(): string }; postedAt: Date; direction: 'IN' | 'OUT' }>,
 ) {
-  const amountPaid = sumLedgerAmounts(ledgerEntries)
+  const amountPaid = sumLedgerAmountsForDirection(ledgerEntries, 'OUT')
   const remaining = amount - amountPaid
   const paymentStatus = deriveCompanyWithdrawalPaymentStatus(amount, amountPaid)
   const paymentDate = ledgerEntries.length > 0 ? ledgerEntries[0].postedAt.toISOString() : null

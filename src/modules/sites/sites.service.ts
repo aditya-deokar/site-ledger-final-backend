@@ -14,6 +14,7 @@ import { getCompanyForUser } from '../../shared/access/company-access.js'
 import { invalidateSiteListCaches } from '../../services/cache-invalidation.js'
 import { cacheService } from '../../services/cache.service.js'
 import { CacheKeys, CacheTTL } from '../../config/cache-keys.js'
+import { getSiteAgreementFinancials } from '../customers/customer-agreement.service.js'
 
 export type SiteServiceError = {
   error: string
@@ -216,21 +217,18 @@ export async function getSitesForUser(userId: string, showArchived?: 'true' | 'f
 
   const siteSummaries = await Promise.all(
     sites.map(async (site) => {
-      const [partnerAllocatedFund, investorAllocatedFund, totalExpenses, totalExpensesBilled, customerPayments, remainingFund, totalRevenueResult] = await Promise.all([
+      const [partnerAllocatedFund, investorAllocatedFund, totalExpenses, totalExpensesBilled, customerPayments, remainingFund, agreementFinancials] = await Promise.all([
         getSitePartnerAllocatedFund(site.id),
         getSiteEquityInvestorFund(site.id),
         getSiteTotalExpenses(site.id),
         getSiteTotalExpensesBilled(site.id),
         getSiteCustomerPayments(site.id),
         getSiteRemainingFund(site.id),
-        prisma.customer.aggregate({
-          where: { siteId: site.id, isDeleted: false, dealStatus: 'ACTIVE' },
-          _sum: { sellingPrice: true },
-        }),
+        getSiteAgreementFinancials(site.id),
       ])
 
       const allocatedFund = partnerAllocatedFund + investorAllocatedFund
-      const totalRevenue = totalRevenueResult._sum.sellingPrice ?? 0
+      const totalRevenue = agreementFinancials.profitRevenue
       const totalProfit = totalRevenue - totalExpensesBilled
       const flatsSummary = { available: 0, booked: 0, sold: 0 }
       for (const floor of site.floors) {
@@ -291,7 +289,7 @@ export async function getSiteDetailForUser(siteId: string, userId: string) {
     flatCounts,
     customerFlatsCount,
     ownerFlatsCount,
-    totalRevenueResult,
+    agreementFinancials,
   ] = await Promise.all([
     getSitePartnerAllocatedFund(site.id),
     getSiteEquityInvestorFund(site.id),
@@ -306,13 +304,10 @@ export async function getSiteDetailForUser(siteId: string, userId: string) {
     }),
     prisma.flat.count({ where: { siteId: site.id, flatType: 'CUSTOMER' } }),
     prisma.flat.count({ where: { siteId: site.id, flatType: 'EXISTING_OWNER' } }),
-    prisma.customer.aggregate({
-      where: { siteId: site.id, isDeleted: false, dealStatus: 'ACTIVE' },
-      _sum: { sellingPrice: true },
-    }),
+    getSiteAgreementFinancials(site.id),
   ])
 
-  const totalRevenue = totalRevenueResult._sum.sellingPrice ?? 0
+  const totalRevenue = agreementFinancials.profitRevenue
   const totalProfit = totalRevenue - totalExpensesBilled
   const allocatedFund = partnerAllocatedFund + investorAllocatedFund
   const flatsSummary = { available: 0, booked: 0, sold: 0, customerFlats: 0, ownerFlats: 0 }

@@ -9,7 +9,7 @@ export function mapSiteExpense(expense: {
   amount: number
   createdAt: Date
   vendor?: { name: string; type: string } | null
-  ledgerEntries: Array<{ amount: number | string | { toString(): string }; postedAt: Date }>
+  ledgerEntries: Array<{ amount: number | string | { toString(): string }; postedAt: Date; direction: 'IN' | 'OUT' }>
 }) {
   const ledger = mapExpenseLedgerFields(expense.amount, expense.ledgerEntries)
 
@@ -33,12 +33,18 @@ export function mapSiteExpense(expense: {
 export function mapExpensePayment(payment: {
   id: string
   amount: number | { toString(): string }
+  direction: 'IN' | 'OUT'
+  movementType: string
   note: string | null
   postedAt: Date
+  reversalOfPaymentId?: string | null
 }) {
   return {
     id: payment.id,
     amount: Number(payment.amount),
+    direction: payment.direction,
+    movementType: payment.movementType,
+    reversalOfPaymentId: payment.reversalOfPaymentId ?? null,
     note: payment.note,
     createdAt: payment.postedAt,
   }

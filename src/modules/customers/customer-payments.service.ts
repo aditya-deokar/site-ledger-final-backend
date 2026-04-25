@@ -1,7 +1,8 @@
 import { Prisma } from '@prisma/client'
 import { prisma } from '../../db/prisma.js'
-import { getCustomerPaidTotal, getCustomerRemaining, sumDirectionalLedgerAmounts } from '../../services/customer-ledger.service.js'
+import { getCustomerPaidTotal, getCustomerRemaining } from '../../services/customer-ledger.service.js'
 import { createLedgerEntry } from '../../services/ledger.service.js'
+import { createCustomerReceiptForPayment } from '../../services/receipt.service.js'
 import { invalidateCustomerCaches } from '../../services/cache-invalidation.js'
 import { cacheService } from '../../services/cache.service.js'
 import { CacheKeys } from '../../config/cache-keys.js'
@@ -26,15 +27,9 @@ export async function recordCustomerPaymentForUser(
 
   const customerWithLedger = await prisma.customer.findFirst({
     where: { id: customerId, companyId: company.id, isDeleted: false, dealStatus: 'ACTIVE' },
-    include: { ledgerEntries: { select: { amount: true, direction: true } } },
+    select: { id: true, siteId: true, flatId: true },
   })
   if (!customerWithLedger) return { error: 'Customer not found', status: 404 }
-
-  const currentPaid = sumDirectionalLedgerAmounts(customerWithLedger.ledgerEntries)
-  const newTotal = currentPaid + data.amount
-  if (newTotal > customerWithLedger.sellingPrice) {
-    return { error: 'AMOUNT_EXCEEDS_LIMIT', status: 400 }
-  }
 
   const normalizedReferenceNumber = data.referenceNumber?.trim() || undefined
 
@@ -56,17 +51,23 @@ export async function recordCustomerPaymentForUser(
       tx,
     )
 
-    if (newTotal >= customerWithLedger.sellingPrice && customerWithLedger.flatId) {
+    const receipt = await createCustomerReceiptForPayment(payment.id, userId, tx)
+    const amountPaid = await getCustomerPaidTotal(customerWithLedger.id, tx)
+    const paymentCustomer = await tx.customer.findUnique({
+      where: { id: customerWithLedger.id },
+      select: { sellingPrice: true, flatId: true },
+    })
+
+    if (paymentCustomer && amountPaid >= paymentCustomer.sellingPrice && paymentCustomer.flatId) {
       await tx.flat.update({
-        where: { id: customerWithLedger.flatId },
+        where: { id: paymentCustomer.flatId },
         data: { status: 'SOLD' },
       })
     }
 
-    const amountPaid = await getCustomerPaidTotal(customerWithLedger.id, tx)
     const remaining = await getCustomerRemaining(customerWithLedger.id, tx)
 
-    return { payment, amountPaid, remaining }
+    return { payment, receipt, amountPaid, remaining }
   }, LEDGER_TX_OPTIONS)
 
   await invalidateCustomerCaches(company.id, customerWithLedger.siteId!)
@@ -86,6 +87,12 @@ export async function recordCustomerPaymentForUser(
       note: result.payment.note,
       createdAt: result.payment.postedAt,
     },
+    receipt: {
+      id: result.receipt.id,
+      receiptNumber: result.receipt.receiptNumber,
+      status: result.receipt.status,
+      createdAt: result.receipt.createdAt,
+    },
   }
 }
 
@@ -97,6 +104,20 @@ export async function getCustomerPaymentsForUser(customerId: string, userId: str
   const payments = await prisma.payment.findMany({
     where: { customerId, companyId: company.id },
     orderBy: { postedAt: 'desc' },
+    include: {
+      receipt: {
+        select: {
+          id: true,
+          receiptNumber: true,
+          status: true,
+        },
+      },
+      reversalEntry: {
+        select: {
+          id: true,
+        },
+      },
+    },
   })
 
   return {

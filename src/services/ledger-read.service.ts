@@ -7,7 +7,7 @@ type LedgerAmountEntry = {
   amount: Prisma.Decimal | number | string | { toString(): string }
 }
 
-type DirectionalLedgerAmountEntry = LedgerAmountEntry & {
+export type DirectionalLedgerAmountEntry = LedgerAmountEntry & {
   direction: Direction
 }
 
@@ -20,6 +20,14 @@ export function sumDirectionalLedgerAmounts(entries: DirectionalLedgerAmountEntr
     const amount = Number(entry.amount)
     return sum + (entry.direction === 'IN' ? amount : -amount)
   }, 0)
+}
+
+export function sumLedgerAmountsForDirection(
+  entries: DirectionalLedgerAmountEntry[],
+  primaryDirection: Direction,
+): number {
+  const directionalTotal = sumDirectionalLedgerAmounts(entries)
+  return primaryDirection === 'IN' ? directionalTotal : -directionalTotal
 }
 
 export function derivePaymentStatus(
@@ -55,6 +63,15 @@ async function getDirectionalPaymentTotal(
   ])
 
   return incoming - outgoing
+}
+
+async function getNetPaymentTotalByDirection(
+  where: Prisma.PaymentWhereInput,
+  primaryDirection: Direction,
+  db: LedgerReadDb,
+): Promise<number> {
+  const directionalTotal = await getDirectionalPaymentTotal(where, db)
+  return primaryDirection === 'IN' ? directionalTotal : -directionalTotal
 }
 
 async function getWalletBalance(
@@ -96,7 +113,7 @@ export async function getExpensePaidTotal(
   tx?: LedgerReadDb,
 ): Promise<number> {
   const db = tx ?? prisma
-  return getPaymentTotal({ expenseId }, db)
+  return getNetPaymentTotalByDirection({ expenseId }, 'OUT', db)
 }
 
 export async function getInvestorTransactionPaidTotal(
@@ -104,7 +121,15 @@ export async function getInvestorTransactionPaidTotal(
   tx?: LedgerReadDb,
 ): Promise<number> {
   const db = tx ?? prisma
-  return getPaymentTotal({ investorTransactionId: transactionId }, db)
+  const transaction = await db.investorTransaction.findUnique({
+    where: { id: transactionId },
+    select: { kind: true },
+  })
+
+  if (!transaction) return 0
+
+  const primaryDirection: Direction = transaction.kind === 'PRINCIPAL_IN' ? 'IN' : 'OUT'
+  return getNetPaymentTotalByDirection({ investorTransactionId: transactionId }, primaryDirection, db)
 }
 
 export async function getCompanyWithdrawalPaidTotal(
@@ -112,7 +137,7 @@ export async function getCompanyWithdrawalPaidTotal(
   tx?: LedgerReadDb,
 ): Promise<number> {
   const db = tx ?? prisma
-  return getPaymentTotal({ companyWithdrawalId: withdrawalId }, db)
+  return getNetPaymentTotalByDirection({ companyWithdrawalId: withdrawalId }, 'OUT', db)
 }
 
 export async function getPartnerPaidTotal(

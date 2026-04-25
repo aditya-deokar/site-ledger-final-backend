@@ -16,6 +16,10 @@ export const siteReportFinancialSummarySchema = z.object({
   investorAllocatedFund: z.number(),
   totalAllocatedFund: z.number(),
   totalWithdrawnFund: z.number(),
+  totalAgreementValue: z.number(),
+  netSaleValue: z.number(),
+  totalTaxAmount: z.number(),
+  totalDiscounts: z.number(),
   totalExpensesPaid: z.number(),
   totalExpensesRecorded: z.number(),
   totalExpensesOutstanding: z.number(),
@@ -41,6 +45,9 @@ export const siteReportCustomerSummarySchema = z.object({
   soldCustomers: z.number(),
   existingOwners: z.number(),
   totalAgreementValue: z.number(),
+  netSaleValue: z.number(),
+  totalTaxAmount: z.number(),
+  totalDiscounts: z.number(),
   totalBookingAmount: z.number(),
   totalCollected: z.number(),
   totalOutstanding: z.number(),
@@ -174,4 +181,3 @@ export const siteReportSchema = z.object({
   fundHistory: z.array(siteReportFundHistoryRowSchema),
   recentActivity: z.array(siteReportActivityRowSchema),
 })
-

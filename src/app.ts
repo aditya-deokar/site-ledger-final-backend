@@ -10,6 +10,7 @@ import { siteRoutes } from './routes/sites.js'
 import { vendorRoutes } from './routes/vendors.js'
 import { customerRoutes } from './routes/customers.js'
 import { investorRoutes } from './routes/investors.js'
+import { paymentRoutes } from './routes/payments.js'
 import { employeeRoutes } from './routes/employees.js'
 import { attendanceRoutes } from './routes/attendance.js'
 import { employeeTransactionRoutes } from './routes/transactions.js'
@@ -20,8 +21,51 @@ import { LedgerError } from './services/ledger.service.js'
 import { jsonError } from './utils/response.js'
 import { requestId } from './middlewares/request-id.js'
 import { createLogger } from './config/logger.js'
+import { loadEnv } from './config/env.js'
 
 const httpLog = createLogger('http')
+const env = loadEnv()
+
+const configuredOrigins = (env.CORS_ORIGINS ?? '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean)
+
+const allowedOrigins = new Set([
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:3001',
+  'http://127.0.0.1:3001',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'https://www.sitesledger.app',
+  'https://sitesledger.app',
+  'https://www.siteledger.app',
+  'https://siteledger.app',
+  ...configuredOrigins,
+])
+
+function isAllowedOrigin(origin?: string | null) {
+  if (!origin) return false
+
+  if (allowedOrigins.has(origin)) {
+    return true
+  }
+
+  try {
+    const url = new URL(origin)
+    const isLocalHttp = url.protocol === 'http:' && (
+      url.hostname === 'localhost'
+      || url.hostname === '127.0.0.1'
+      || url.hostname === '::1'
+      || url.hostname === '[::1]'
+    )
+
+    return isLocalHttp
+  } catch {
+    return false
+  }
+}
 
 const pinoLogger = createMiddleware(async (c, next) => {
   const start = Date.now()
@@ -46,15 +90,7 @@ export const app = new OpenAPIHono()
 
 app.use('*', cors({
   origin: (origin) => {
-    const allowed = [
-      'http://localhost:3000',
-      'http://localhost:5173',
-      'https://www.sitesledger.app',
-      'https://sitesledger.app',
-      'https://www.siteledger.app',
-      'https://siteledger.app',
-    ]
-    return allowed.includes(origin) ? origin : null
+    return isAllowedOrigin(origin) ? origin : null
   },
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With'],
@@ -88,6 +124,7 @@ app.doc('/openapi.json', {
     { name: 'Vendors', description: 'Manage vendors (electrician, plumber, supplier, etc.)' },
     { name: 'Customers', description: 'Customer flat booking and payment tracking' },
     { name: 'Investors', description: 'Manage equity and fixed-rate investors with transaction history' },
+    { name: 'Payments', description: 'Immutable receipts and payment reversal workflow' },
     { name: 'Employees', description: 'Manage employee profiles and employment details' },
     { name: 'Attendance', description: 'Mark and track employee attendance' },
     { name: 'Employee Transactions', description: 'Track salary, bonus, deduction, and other employee transactions' },
@@ -115,6 +152,7 @@ app.route('/api/vendors', vendorRoutes)
 app.route('/api/sites', customerRoutes)
 app.route('/api/customers', customerRoutes)
 app.route('/api/investors', investorRoutes)
+app.route('/api/payments', paymentRoutes)
 app.route('/api/employees/salary-reminders', salaryReminderRoutes)
 app.route('/api/employees', employeeRoutes)
 app.route('/api/employees', salaryPaymentRoutes)

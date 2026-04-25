@@ -45,6 +45,12 @@ export function registerCustomerPaymentRoutes(customerRoutes: CustomerRouteApp) 
                   note: z.string().nullable(),
                   createdAt: z.string().datetime(),
                 }),
+                receipt: z.object({
+                  id: z.string(),
+                  receiptNumber: z.string(),
+                  status: z.enum(['ACTIVE', 'VOIDED']),
+                  createdAt: z.string().datetime(),
+                }),
               }),
             }),
           },

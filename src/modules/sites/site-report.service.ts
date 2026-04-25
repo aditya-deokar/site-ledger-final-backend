@@ -13,6 +13,7 @@ import {
   getSiteTotalExpensesBilled,
   getSiteWithdrawnFund,
 } from '../../utils/ledger-fund.js'
+import { getSiteAgreementFinancials } from '../customers/customer-agreement.service.js'
 
 function getFloorDisplayName(floorName: string | null, floorNumber: number) {
   return floorName || `Floor ${floorNumber}`
@@ -40,6 +41,8 @@ function mapRecentActivityLabel(movementType: string) {
       return { kind: 'investor', title: 'Investor principal returned' }
     case 'INVESTOR_INTEREST':
       return { kind: 'investor', title: 'Investor interest paid' }
+    case 'REVERSAL':
+      return { kind: 'ledger', title: 'Ledger reversal recorded' }
     default:
       return { kind: 'ledger', title: 'Ledger movement' }
   }
@@ -56,6 +59,7 @@ export async function getSiteReportForUser(siteId: string, userId: string) {
     totalWithdrawnFund,
     totalExpensesPaid,
     totalExpensesRecorded,
+    agreementFinancials,
     customerCollections,
     remainingFund,
     floorsRaw,
@@ -71,6 +75,7 @@ export async function getSiteReportForUser(siteId: string, userId: string) {
     getSiteWithdrawnFund(site.id),
     getSiteTotalExpenses(site.id),
     getSiteTotalExpensesBilled(site.id),
+    getSiteAgreementFinancials(site.id),
     getSiteCustomerPayments(site.id),
     getSiteRemainingFund(site.id),
     prisma.floor.findMany({
@@ -115,7 +120,7 @@ export async function getSiteReportForUser(siteId: string, userId: string) {
       include: {
         vendor: { select: { id: true, name: true, type: true } },
         ledgerEntries: {
-          select: { amount: true, postedAt: true },
+          select: { amount: true, direction: true, postedAt: true },
           orderBy: { postedAt: 'desc' },
         },
       },
@@ -128,7 +133,7 @@ export async function getSiteReportForUser(siteId: string, userId: string) {
           where: { isDeleted: false },
           select: {
             kind: true,
-            ledgerEntries: { select: { amount: true } },
+            ledgerEntries: { select: { amount: true, direction: true } },
           },
         },
       },
@@ -280,7 +285,9 @@ export async function getSiteReportForUser(siteId: string, userId: string) {
   })
 
   const allFlats = floors.flatMap((floor) => floor.flats)
-  const totalAgreementValue = customers.reduce((sum, customer) => sum + customer.sellingPrice, 0)
+  const netSaleValue = agreementFinancials.profitRevenue
+  const totalTaxAmount = agreementFinancials.tax
+  const totalDiscounts = agreementFinancials.discounts + agreementFinancials.credits
   const totalBookingAmount = customers.reduce((sum, customer) => sum + customer.bookingAmount, 0)
   const totalCollected = customers.reduce((sum, customer) => sum + customer.amountPaid, 0)
   const totalOutstanding = customers.reduce((sum, customer) => sum + customer.remaining, 0)
@@ -303,14 +310,18 @@ export async function getSiteReportForUser(siteId: string, userId: string) {
       investorAllocatedFund,
       totalAllocatedFund,
       totalWithdrawnFund,
+      totalAgreementValue: agreementFinancials.payableTotal,
+      netSaleValue,
+      totalTaxAmount,
+      totalDiscounts,
       totalExpensesPaid,
       totalExpensesRecorded,
       totalExpensesOutstanding: Math.max(0, totalExpensesRecorded - totalExpensesPaid),
       customerCollections,
       remainingFund,
-      totalProjectedRevenue: totalAgreementValue,
+      totalProjectedRevenue: netSaleValue,
       totalOutstandingReceivables: totalOutstanding,
-      totalProfit: totalAgreementValue - totalExpensesRecorded,
+      totalProfit: netSaleValue - totalExpensesRecorded,
     },
     inventorySummary: {
       totalUnits: allFlats.length,
@@ -325,7 +336,10 @@ export async function getSiteReportForUser(siteId: string, userId: string) {
       bookedCustomers: customers.filter((customer) => customer.flatStatus === 'BOOKED').length,
       soldCustomers: customers.filter((customer) => customer.flatStatus === 'SOLD').length,
       existingOwners: existingOwners.length,
-      totalAgreementValue,
+      totalAgreementValue: agreementFinancials.payableTotal,
+      netSaleValue,
+      totalTaxAmount,
+      totalDiscounts,
       totalBookingAmount,
       totalCollected,
       totalOutstanding,

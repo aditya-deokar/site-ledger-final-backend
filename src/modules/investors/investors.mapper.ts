@@ -6,7 +6,7 @@ import {
 
 export const investorTransactionInclude = Prisma.validator<Prisma.InvestorTransactionInclude>()({
   ledgerEntries: {
-    select: { amount: true, postedAt: true },
+    select: { amount: true, direction: true, postedAt: true },
     orderBy: { postedAt: 'desc' },
   },
 })

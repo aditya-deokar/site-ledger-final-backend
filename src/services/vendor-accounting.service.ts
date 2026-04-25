@@ -1,10 +1,11 @@
 import { prisma } from '../db/prisma.js'
 import { mapExpenseLedgerFields } from './expense-ledger.service.js'
-import { sumLedgerAmounts, type LedgerReadDb } from './ledger-read.service.js'
+import { sumLedgerAmountsForDirection, type LedgerReadDb } from './ledger-read.service.js'
 
 type VendorPaymentEntry = {
   id: string
   amount: number | string | { toString(): string }
+  direction: 'IN' | 'OUT'
   note: string | null
   postedAt: Date
 }
@@ -61,6 +62,7 @@ export async function getVendorExpenseRecords(
         select: {
           id: true,
           amount: true,
+          direction: true,
           note: true,
           postedAt: true,
         },
@@ -77,7 +79,7 @@ export async function getVendorExpenseRecords(
 
 export function summarizeVendorRecords(expenses: VendorExpenseRecord[]) {
   const totalBilled = expenses.reduce((sum, expense) => sum + expense.amount, 0)
-  const totalPaid = expenses.reduce((sum, expense) => sum + sumLedgerAmounts(expense.ledgerEntries), 0)
+  const totalPaid = expenses.reduce((sum, expense) => sum + sumLedgerAmountsForDirection(expense.ledgerEntries, 'OUT'), 0)
 
   return {
     totalBilled,
@@ -121,6 +123,7 @@ export function mapVendorPayments(expenses: VendorExpenseRecord[]) {
         expenseId: expense.id,
         expenseAmount: expense.amount,
         amount: Number(payment.amount),
+        direction: payment.direction,
         note: payment.note,
         siteId: expense.siteId,
         siteName: expense.site.name,
@@ -167,11 +170,11 @@ export function buildVendorStatement(expenses: VendorExpenseRecord[]) {
         expenseId: expense.id,
         date: payment.postedAt.toISOString(),
         billAmount: 0,
-        paymentAmount: Number(payment.amount),
+        paymentAmount: payment.direction === 'OUT' ? Number(payment.amount) : -Number(payment.amount),
+        note: payment.note,
         balance: 0,
         description: expense.description,
         reason: expense.reason,
-        note: payment.note,
         siteId: expense.siteId,
         siteName: expense.site.name,
         sortDate: payment.postedAt.getTime(),

@@ -3,7 +3,7 @@ import { prisma } from '../db/prisma.js'
 import {
   derivePaymentStatus,
   getInvestorTransactionPaidTotal,
-  sumLedgerAmounts,
+  sumLedgerAmountsForDirection,
   type LedgerReadDb,
 } from './ledger-read.service.js'
 
@@ -14,6 +14,7 @@ type LedgerAmountEntry = {
 }
 
 type LedgerAmountWithPostedAt = LedgerAmountEntry & {
+  direction: 'IN' | 'OUT'
   postedAt: Date
 }
 
@@ -24,6 +25,10 @@ type InvestorTransactionWithLedger = {
   note: string | null
   createdAt: Date
   ledgerEntries: LedgerAmountWithPostedAt[]
+}
+
+function getInvestorTransactionPrimaryDirection(kind: InvestorTransactionKind): 'IN' | 'OUT' {
+  return kind === 'PRINCIPAL_IN' ? 'IN' : 'OUT'
 }
 
 export function deriveInvestorTransactionPaymentStatus(
@@ -52,10 +57,11 @@ export async function getInvestorTransactionRemaining(
 }
 
 export function mapInvestorTransactionLedgerFields(
+  kind: InvestorTransactionKind,
   amount: number,
   ledgerEntries: LedgerAmountWithPostedAt[],
 ) {
-  const amountPaid = sumLedgerAmounts(ledgerEntries)
+  const amountPaid = sumLedgerAmountsForDirection(ledgerEntries, getInvestorTransactionPrimaryDirection(kind))
   const remaining = amount - amountPaid
   const paymentStatus = deriveInvestorTransactionPaymentStatus(amount, amountPaid)
   const paymentDate = ledgerEntries.length > 0 ? ledgerEntries[0].postedAt.toISOString() : null
@@ -69,14 +75,17 @@ export function mapInvestorTransactionLedgerFields(
 }
 
 export function calculateInvestorLedgerTotals(
-  transactions: Array<{ kind: InvestorTransactionKind; ledgerEntries: LedgerAmountEntry[] }>,
+  transactions: Array<{ kind: InvestorTransactionKind; ledgerEntries: Array<LedgerAmountEntry & { direction: 'IN' | 'OUT' }> }>,
 ) {
   let principalInTotal = 0
   let principalOutTotal = 0
   let interestTotal = 0
 
   for (const transaction of transactions) {
-    const paidTotal = sumLedgerAmounts(transaction.ledgerEntries)
+    const paidTotal = sumLedgerAmountsForDirection(
+      transaction.ledgerEntries,
+      getInvestorTransactionPrimaryDirection(transaction.kind),
+    )
 
     if (transaction.kind === 'PRINCIPAL_IN') {
       principalInTotal += paidTotal
@@ -177,6 +186,7 @@ export function mapInvestorTransactionResponse(
   transaction: InvestorTransactionWithLedger,
 ) {
   const { amountPaid, remaining, paymentStatus, paymentDate } = mapInvestorTransactionLedgerFields(
+    transaction.kind,
     transaction.amount,
     transaction.ledgerEntries,
   )

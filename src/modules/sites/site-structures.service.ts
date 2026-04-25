@@ -355,6 +355,24 @@ export async function updateFlatForUser(
   })
   if (!flat) return { error: 'Flat not found', status: 404 as const }
 
+  const activeCustomer = await prisma.customer.findFirst({
+    where: { flatId, siteId: site.id, isDeleted: false, dealStatus: 'ACTIVE' },
+    select: { id: true },
+  })
+  if (activeCustomer) {
+    return {
+      error: 'Flat status is controlled by the active customer ledger. Update the customer deal instead.',
+      status: 400 as const,
+    }
+  }
+
+  if (status !== 'AVAILABLE') {
+    return {
+      error: 'Use the booking flow to mark a flat as BOOKED or SOLD.',
+      status: 400 as const,
+    }
+  }
+
   const updated = await prisma.flat.update({
     where: { id: flatId },
     data: { status },

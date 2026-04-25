@@ -4,11 +4,17 @@ import { getCompanyForUser } from '../../shared/access/company-access.js'
 import { getCustomerPaidTotal, getCustomerRemaining, sumDirectionalLedgerAmounts } from '../../services/customer-ledger.service.js'
 import { createLedgerEntry, LedgerError } from '../../services/ledger.service.js'
 import { getSiteBalance } from '../../services/ledger-read.service.js'
+import { createCustomerReceiptForPayment } from '../../services/receipt.service.js'
 import { invalidateCustomerCaches } from '../../services/cache-invalidation.js'
 import { cacheService } from '../../services/cache.service.js'
 import { CacheKeys, CacheTTL } from '../../config/cache-keys.js'
 import { LEDGER_TX_OPTIONS } from '../../shared/constants/ledger.js'
 import { verifySiteOwnership } from './customer-access.service.js'
+import {
+  createBaseAgreementLine,
+  syncCustomerAgreementPayable,
+  updateBaseAgreementLine,
+} from './customer-agreement.service.js'
 import {
   mapBookingCustomerResponse,
   mapCompanyCustomerSummary,
@@ -167,8 +173,15 @@ export async function bookFlatForUser(
           },
         })
 
+        await createBaseAgreementLine(tx, {
+          customerId: customer.id,
+          companyId: company.id,
+          siteId: site.id,
+          amount: data.sellingPrice,
+        })
+
         if (data.bookingAmount > 0) {
-          await createLedgerEntry(
+          const payment = await createLedgerEntry(
             {
               companyId: company.id,
               siteId: site.id,
@@ -184,6 +197,8 @@ export async function bookFlatForUser(
             },
             tx,
           )
+
+          await createCustomerReceiptForPayment(payment.id, userId, tx)
         }
 
         const newStatus = data.bookingAmount >= data.sellingPrice ? ('SOLD' as const) : ('BOOKED' as const)
@@ -298,32 +313,52 @@ export async function updateCustomerForUser(
   flatId: string,
   customerId: string,
   userId: string,
-  data: { name?: string; phone?: string; email?: string },
+  data: { name?: string; phone?: string; email?: string; sellingPrice?: number },
 ) {
   const { site } = await verifySiteOwnership(siteId, userId)
   if (!site) return { error: 'Site not found', status: 404 }
 
   const existing = await prisma.customer.findFirst({
     where: { id: customerId, flatId, siteId: site.id, isDeleted: false, dealStatus: 'ACTIVE' },
+    include: { ledgerEntries: { select: { amount: true, direction: true } } },
   })
   if (!existing) return { error: 'Customer not found', status: 404 }
 
+  const currentPaid = sumDirectionalLedgerAmounts(existing.ledgerEntries)
+  if (data.sellingPrice !== undefined && data.sellingPrice < currentPaid) {
+    return { error: 'Selling price cannot be lower than the amount already collected.', status: 400 }
+  }
+
   const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    const { sellingPrice, ...profileData } = data
     const customer = await tx.customer.update({
       where: { id: customerId },
-      data,
+      data: profileData,
       include: {
         ledgerEntries: { select: { amount: true, direction: true } },
         flat: { include: { floor: true } },
       },
     })
 
+    let agreementTotal = customer.sellingPrice
+    if (sellingPrice !== undefined) {
+      await updateBaseAgreementLine(tx, {
+        customerId,
+        companyId: site.companyId,
+        siteId,
+        amount: sellingPrice,
+      })
+      const totals = await syncCustomerAgreementPayable(customerId, tx)
+      agreementTotal = totals.payableTotal
+    }
+
     const amountPaid = sumDirectionalLedgerAmounts(customer.ledgerEntries)
 
     let flatStatus = customer.flat!.status
-    if (amountPaid >= customer.sellingPrice && flatStatus !== 'SOLD') {
-      await tx.flat.update({ where: { id: flatId }, data: { status: 'SOLD' } })
-      flatStatus = 'SOLD'
+    const expectedFlatStatus = amountPaid >= agreementTotal ? ('SOLD' as const) : ('BOOKED' as const)
+    if (flatStatus !== expectedFlatStatus) {
+      await tx.flat.update({ where: { id: flatId }, data: { status: expectedFlatStatus } })
+      flatStatus = expectedFlatStatus
     }
 
     const remaining = await getCustomerRemaining(customer.id, tx)
@@ -331,6 +366,7 @@ export async function updateCustomerForUser(
     return {
       customer: {
         ...customer,
+        sellingPrice: agreementTotal,
         flat: customer.flat
           ? {
               ...customer.flat,

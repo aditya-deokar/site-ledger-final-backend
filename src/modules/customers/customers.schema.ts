@@ -33,6 +33,7 @@ export const updateCustomerSchema = z.object({
   name: z.string().min(1).optional(),
   phone: z.string().optional(),
   email: z.string().email().optional(),
+  sellingPrice: z.number().min(0).optional(),
 })
 
 export const cancelDealSchema = z.object({
@@ -88,10 +89,16 @@ export const customerPaymentHistoryItemSchema = z.object({
   id: z.string(),
   amount: z.number(),
   direction: z.enum(['IN', 'OUT']),
-  movementType: z.enum(['CUSTOMER_PAYMENT', 'CUSTOMER_REFUND']),
+  movementType: z.enum(['CUSTOMER_PAYMENT', 'CUSTOMER_REFUND', 'REVERSAL']),
   paymentMode: paymentModeSchema.nullable(),
   referenceNumber: z.string().nullable(),
   note: z.string().nullable(),
+  isReversed: z.boolean().optional(),
+  reversedAt: z.string().datetime().nullable().optional(),
+  reversalPaymentId: z.string().nullable().optional(),
+  receiptId: z.string().nullable().optional(),
+  receiptNumber: z.string().nullable().optional(),
+  receiptStatus: z.enum(['ACTIVE', 'VOIDED']).nullable().optional(),
   createdAt: z.string().datetime(),
 })
 

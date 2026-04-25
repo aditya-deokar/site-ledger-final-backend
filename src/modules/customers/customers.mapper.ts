@@ -197,6 +197,13 @@ export function mapCustomerPaymentHistoryItem(payment: {
   referenceNumber: string | null
   note: string | null
   postedAt: Date
+  reversedAt?: Date | null
+  reversalEntry?: { id: string } | null
+  receipt?: {
+    id: string
+    receiptNumber: string
+    status: 'ACTIVE' | 'VOIDED'
+  } | null
 }) {
   return {
     id: payment.id,
@@ -206,6 +213,12 @@ export function mapCustomerPaymentHistoryItem(payment: {
     paymentMode: payment.paymentMode,
     referenceNumber: payment.referenceNumber,
     note: payment.note,
+    isReversed: Boolean(payment.reversedAt ?? payment.reversalEntry),
+    reversedAt: payment.reversedAt ?? null,
+    reversalPaymentId: payment.reversalEntry?.id ?? null,
+    receiptId: payment.receipt?.id ?? null,
+    receiptNumber: payment.receipt?.receiptNumber ?? null,
+    receiptStatus: payment.receipt?.status ?? null,
     createdAt: payment.postedAt,
   }
 }

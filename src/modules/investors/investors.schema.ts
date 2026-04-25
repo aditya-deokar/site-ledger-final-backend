@@ -66,6 +66,9 @@ export const transactionResponseSchema = z.object({
 export const paymentHistoryItemSchema = z.object({
   id: z.string(),
   amount: z.number(),
+  direction: z.enum(['IN', 'OUT']),
+  movementType: z.string(),
+  reversalOfPaymentId: z.string().nullable(),
   note: z.string().nullable(),
   createdAt: z.string().datetime(),
 })

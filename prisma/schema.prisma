@@ -42,6 +42,10 @@ model Company {
   id          String              @id @default(cuid())
   name        String
   address     String?
+  phone       String?
+  email       String?
+  gstin       String?
+  logo        String?
   createdBy   String              @unique
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @updatedAt
@@ -185,6 +189,7 @@ model Customer {
   isDeleted     Boolean   @default(false)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
+  agreementLines CustomerAgreementLine[]
   ledgerEntries Payment[] @relation("CustomerLedgerEntries")
   company       Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
   flat          Flat?     @relation(fields: [flatId], references: [id])
@@ -192,6 +197,28 @@ model Customer {
 
   @@index([companyId, dealStatus, createdAt])
   @@index([siteId, dealStatus, createdAt])
+}
+
+model CustomerAgreementLine {
+  id              String                    @id @default(cuid())
+  customerId      String
+  companyId       String
+  siteId          String?
+  type            CustomerAgreementLineType
+  label           String
+  amount          Decimal                   @db.Decimal(18, 2)
+  ratePercent     Float?
+  calculationBase Decimal?                  @db.Decimal(18, 2)
+  affectsProfit   Boolean                   @default(true)
+  note            String?
+  isDeleted       Boolean                   @default(false)
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+  customer        Customer                  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, isDeleted, createdAt])
+  @@index([siteId, isDeleted, type])
+  @@index([companyId, isDeleted, type])
 }
 
 model Investor {
@@ -235,6 +262,28 @@ model CompanyWithdrawal {
   company       Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
 }
 
+model ReceiptSequence {
+  key       String   @id
+  lastValue Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Receipt {
+  id              String        @id @default(cuid())
+  receiptNumber   String        @unique
+  paymentId       String        @unique
+  snapshot        Json          @db.JsonB
+  status          ReceiptStatus @default(ACTIVE)
+  voidedAt        DateTime?
+  voidReason      String?
+  createdByUserId String
+  createdAt       DateTime      @default(now())
+  payment         Payment       @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  @@index([status, createdAt])
+}
+
 model Payment {
   id                    String               @id @default(cuid())
   companyId             String
@@ -254,6 +303,10 @@ model Payment {
   investorTransactionId String?
   companyWithdrawalId   String?
   partnerId             String?
+  reversalOfPaymentId   String?              @unique
+  reversedAt            DateTime?
+  reversedByUserId      String?
+  reversalReason        String?
   company               Company              @relation(fields: [companyId], references: [id], onDelete: Restrict)
   site                  Site?                @relation(fields: [siteId], references: [id], onDelete: Restrict)
   customer              Customer?            @relation("CustomerLedgerEntries", fields: [customerId], references: [id])
@@ -261,11 +314,15 @@ model Payment {
   investorTransaction   InvestorTransaction? @relation("InvestorTransactionLedgerEntries", fields: [investorTransactionId], references: [id])
   companyWithdrawal     CompanyWithdrawal?   @relation("CompanyWithdrawalLedgerEntries", fields: [companyWithdrawalId], references: [id])
   partner               Partner?             @relation("PartnerLedgerEntries", fields: [partnerId], references: [id])
+  reversalOf            Payment?             @relation("PaymentReversal", fields: [reversalOfPaymentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reversalEntry         Payment?             @relation("PaymentReversal")
+  receipt               Receipt?
 
   @@unique([companyId, idempotencyKey])
   @@index([companyId, walletType, postedAt])
   @@index([siteId, postedAt])
   @@index([movementType, postedAt])
+  @@index([reversedAt, postedAt])
 }
 
 model Employee {
@@ -377,6 +434,14 @@ enum CustomerDealStatus {
   CANCELLED
 }
 
+enum CustomerAgreementLineType {
+  BASE_PRICE
+  CHARGE
+  TAX
+  DISCOUNT
+  CREDIT
+}
+
 enum InvestorType {
   EQUITY
   FIXED_RATE
@@ -463,4 +528,9 @@ enum PaymentStatus {
   PENDING
   PARTIAL
   COMPLETED
+}
+
+enum ReceiptStatus {
+  ACTIVE
+  VOIDED
 }

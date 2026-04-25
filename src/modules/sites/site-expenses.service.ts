@@ -28,7 +28,7 @@ export async function getExpensesForUser(siteId: string, userId: string) {
     include: {
       vendor: { select: { id: true, name: true, type: true } },
       ledgerEntries: {
-        select: { amount: true, postedAt: true },
+        select: { amount: true, direction: true, postedAt: true },
         orderBy: { postedAt: 'desc' },
       },
     },
@@ -55,7 +55,7 @@ export async function getExpensesSummaryForUser(siteId: string, userId: string) 
     getSiteTotalExpenses(site.id),
     prisma.expense.groupBy({
       by: ['type'],
-      where: { siteId: site.id },
+      where: { siteId: site.id, isDeleted: false },
       _sum: { amount: true },
     }),
   ])
@@ -82,13 +82,14 @@ export async function createExpenseForUser(
     description?: string
     amount: number
     amountPaid?: number
+    paymentDate?: string
     idempotencyKey?: string
   },
 ) {
   const { company, site } = await getSiteForUser(siteId, userId)
   if (!company || !site) return null
 
-  const { type, reason, vendorId, description, amount, amountPaid = 0, idempotencyKey } = data
+  const { type, reason, vendorId, description, amount, amountPaid = 0, paymentDate, idempotencyKey } = data
 
   if (type === 'VENDOR') {
     if (!vendorId) return { error: 'vendorId is required for vendor expenses', status: 400 as const }
@@ -114,7 +115,7 @@ export async function createExpenseForUser(
       },
     })
 
-    let paymentDate: string | null = null
+    let initialPaymentDate: string | null = null
     if (amountPaid > 0) {
       const payment = await createLedgerEntry({
         companyId: company.id,
@@ -124,10 +125,11 @@ export async function createExpenseForUser(
         movementType: 'EXPENSE_PAYMENT',
         amount: new Prisma.Decimal(amountPaid),
         idempotencyKey: idempotencyKey ?? `expense-create:${expense.id}:${Date.now()}`,
+        postedAt: paymentDate ? new Date(paymentDate) : undefined,
         note: 'Initial payment upon recording expense',
         expenseId: expense.id,
       }, tx)
-      paymentDate = payment.postedAt.toISOString()
+      initialPaymentDate = payment.postedAt.toISOString()
     }
 
     const paidTotal = await getExpensePaidTotal(expense.id, tx)
@@ -135,7 +137,7 @@ export async function createExpenseForUser(
     const paymentStatus = deriveExpensePaymentStatus(paidTotal, expense.amount)
     const siteRemainingFund = await getSiteLedgerNetCash(site.id, tx)
 
-    return { expense, paidTotal, remaining, paymentStatus, paymentDate, siteRemainingFund }
+    return { expense, paidTotal, remaining, paymentStatus, paymentDate: initialPaymentDate, siteRemainingFund }
   }, LEDGER_TX_OPTIONS)
 
   const expense = result.expense
@@ -229,6 +231,15 @@ export async function getExpensePaymentsForUser(siteId: string, expenseId: strin
   const payments = await prisma.payment.findMany({
     where: { expenseId, siteId: site.id, companyId: site.companyId },
     orderBy: { postedAt: 'desc' },
+    select: {
+      id: true,
+      amount: true,
+      direction: true,
+      movementType: true,
+      note: true,
+      postedAt: true,
+      reversalOfPaymentId: true,
+    },
   })
 
   return {
@@ -244,6 +255,14 @@ export async function deleteExpenseForUser(siteId: string, expenseId: string, us
     where: { id: expenseId, siteId: site.id, isDeleted: false },
   })
   if (!expense) return { error: 'Expense not found', status: 404 as const }
+
+  const paidTotal = await getExpensePaidTotal(expenseId)
+  if (paidTotal > 0) {
+    return {
+      error: 'Cannot delete an expense with recorded payments. Record a reversal instead.',
+      status: 400 as const,
+    }
+  }
 
   await prisma.expense.update({ where: { id: expenseId }, data: { isDeleted: true } })
   await invalidateExpenseCaches(company.id, site.id)
