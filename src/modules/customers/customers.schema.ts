@@ -1,6 +1,17 @@
 import { z } from '@hono/zod-openapi'
 
 export const paymentModeSchema = z.enum(['CASH', 'CHEQUE', 'BANK_TRANSFER', 'UPI'])
+export const bookingAgreementLineTypeSchema = z.enum(['CHARGE', 'TAX', 'DISCOUNT', 'CREDIT'])
+
+export const bookingAgreementLineSchema = z.object({
+  type: bookingAgreementLineTypeSchema,
+  label: z.string().trim().min(1),
+  amount: z.number().min(0),
+  ratePercent: z.number().min(0).optional(),
+  calculationBase: z.number().min(0).optional(),
+  affectsProfit: z.boolean().optional(),
+  note: z.string().optional(),
+})
 
 export const createCustomerSchema = z.object({
   name: z.string().min(1),
@@ -11,6 +22,7 @@ export const createCustomerSchema = z.object({
   paymentMode: paymentModeSchema.optional(),
   referenceNumber: z.string().trim().optional(),
   customerType: z.enum(['CUSTOMER', 'EXISTING_OWNER']).optional(),
+  agreementLines: z.array(bookingAgreementLineSchema).optional(),
 }).superRefine((data, ctx) => {
   if (data.bookingAmount > 0 && !data.paymentMode) {
     ctx.addIssue({
@@ -27,6 +39,28 @@ export const createCustomerSchema = z.object({
       path: ['referenceNumber'],
     })
   }
+
+  data.agreementLines?.forEach((line, index) => {
+    if (line.type === 'TAX' && (line.ratePercent === undefined || line.ratePercent <= 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Tax lines must include a percentage greater than zero',
+        path: ['agreementLines', index, 'ratePercent'],
+      })
+    }
+
+    if (line.type === 'DISCOUNT') {
+      const hasRatePercent = line.ratePercent !== undefined && line.ratePercent > 0
+      const hasFixedAmount = line.amount > 0
+      if (!hasRatePercent && !hasFixedAmount) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Discount needs a fixed amount or percentage',
+          path: ['agreementLines', index, 'amount'],
+        })
+      }
+    }
+  })
 })
 
 export const updateCustomerSchema = z.object({

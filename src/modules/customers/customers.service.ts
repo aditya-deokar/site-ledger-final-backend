@@ -73,6 +73,31 @@ function normalizeCurrencyAmount(value: number) {
   return Number(value.toFixed(2))
 }
 
+function defaultBookingAgreementAffectsProfit(type: 'CHARGE' | 'TAX' | 'DISCOUNT' | 'CREDIT') {
+  return type !== 'TAX'
+}
+
+type BookingAgreementLineInput = {
+  type: 'CHARGE' | 'TAX' | 'DISCOUNT' | 'CREDIT'
+  label: string
+  amount: number
+  ratePercent?: number
+  calculationBase?: number
+  affectsProfit?: boolean
+  note?: string
+}
+
+function hasRateBasedCalculation(line: BookingAgreementLineInput) {
+  return line.type === 'TAX' || (line.type === 'DISCOUNT' && line.ratePercent !== undefined && line.ratePercent > 0)
+}
+
+function resolveBookingAgreementLineAmount(line: BookingAgreementLineInput, fallbackBaseAmount: number) {
+  if (!hasRateBasedCalculation(line)) return normalizeCurrencyAmount(line.amount)
+
+  const calculationBase = line.calculationBase !== undefined ? line.calculationBase : fallbackBaseAmount
+  return normalizeCurrencyAmount(calculationBase * ((line.ratePercent ?? 0) / 100))
+}
+
 async function buildCancelBookingInsufficientFundsError(siteId: string, refundAmount: number): Promise<CustomerServiceError> {
   const availableFund = normalizeCurrencyAmount(await getSiteBalance(siteId))
   const normalizedRefundAmount = normalizeCurrencyAmount(refundAmount)
@@ -138,14 +163,11 @@ export async function bookFlatForUser(
     paymentMode?: 'CASH' | 'CHEQUE' | 'BANK_TRANSFER' | 'UPI'
     referenceNumber?: string
     customerType?: 'CUSTOMER' | 'EXISTING_OWNER'
+    agreementLines?: BookingAgreementLineInput[]
   },
 ) {
   const { company, site } = await verifySiteOwnership(siteId, userId)
   if (!company || !site) return { error: 'Site not found', status: 404 }
-
-  if (data.bookingAmount > data.sellingPrice) {
-    return { error: 'AMOUNT_EXCEEDS_LIMIT', status: 400 }
-  }
 
   const result = await prisma
     .$transaction(
@@ -180,6 +202,38 @@ export async function bookFlatForUser(
           amount: data.sellingPrice,
         })
 
+        if (data.agreementLines?.length) {
+          for (const line of data.agreementLines) {
+            const rateBased = hasRateBasedCalculation(line)
+            const calculationBase = rateBased ? (line.calculationBase ?? data.sellingPrice) : undefined
+            const resolvedAmount = resolveBookingAgreementLineAmount(
+              {
+                ...line,
+                calculationBase,
+              },
+              data.sellingPrice,
+            )
+
+            await tx.customerAgreementLine.create({
+              data: {
+                customerId: customer.id,
+                companyId: company.id,
+                siteId: site.id,
+                type: line.type,
+                label: line.label.trim(),
+                amount: new Prisma.Decimal(resolvedAmount),
+                ratePercent: rateBased ? (line.ratePercent ?? null) : null,
+                calculationBase: calculationBase !== undefined ? new Prisma.Decimal(calculationBase) : null,
+                affectsProfit: line.affectsProfit ?? defaultBookingAgreementAffectsProfit(line.type),
+                note: line.note?.trim() || null,
+              },
+            })
+          }
+        }
+
+        const agreementTotals = await syncCustomerAgreementPayable(customer.id, tx)
+        if (data.bookingAmount > agreementTotals.payableTotal) throw new Error('AMOUNT_EXCEEDS_LIMIT')
+
         if (data.bookingAmount > 0) {
           const payment = await createLedgerEntry(
             {
@@ -201,7 +255,7 @@ export async function bookFlatForUser(
           await createCustomerReceiptForPayment(payment.id, userId, tx)
         }
 
-        const newStatus = data.bookingAmount >= data.sellingPrice ? ('SOLD' as const) : ('BOOKED' as const)
+        const newStatus = data.bookingAmount >= agreementTotals.payableTotal ? ('SOLD' as const) : ('BOOKED' as const)
         await tx.flat.update({
           where: { id: flat.id },
           data: { status: newStatus },
@@ -211,7 +265,10 @@ export async function bookFlatForUser(
         const remaining = await getCustomerRemaining(customer.id, tx)
 
         return {
-          customer,
+          customer: {
+            ...customer,
+            sellingPrice: agreementTotals.payableTotal,
+          },
           flatNumber: flat.flatNumber,
           customFlatId: flat.customFlatId,
           floorNumber: flat.floor.floorNumber,
@@ -229,6 +286,9 @@ export async function bookFlatForUser(
       }
       if (err instanceof Error && err.message === 'FLAT_NOT_AVAILABLE') {
         return { error: 'Flat is not available for booking', status: 400 as const }
+      }
+      if (err instanceof Error && err.message === 'AMOUNT_EXCEEDS_LIMIT') {
+        return { error: 'AMOUNT_EXCEEDS_LIMIT', status: 400 as const }
       }
       throw err
     })
