@@ -48,6 +48,10 @@ type BookingSuccessResult = {
   customFlatId: string | null
   floorNumber: number
   floorName: string | null
+  wingId: string | null
+  wingName: string | null
+  unitType: string | null
+  flatType: string
   flatStatus: 'BOOKED' | 'SOLD'
   amountPaid: number
   remaining: number
@@ -136,7 +140,7 @@ export async function getAllCustomersForUser(userId: string, status?: 'BOOKED' |
     },
     include: {
       ledgerEntries: { select: { amount: true, direction: true } },
-      flat: { include: { floor: true } },
+      flat: { include: { floor: { include: { wing: true } } } },
       site: { select: { id: true, name: true } },
     },
     orderBy: { createdAt: 'desc' },
@@ -174,7 +178,7 @@ export async function bookFlatForUser(
       async (tx: Prisma.TransactionClient) => {
         const flat = await tx.flat.findFirst({
           where: { id: flatId, siteId: site.id },
-          include: { floor: true },
+          include: { floor: { include: { wing: true } } },
         })
         if (!flat) throw new Error('FLAT_NOT_FOUND')
         if (flat.status !== 'AVAILABLE') throw new Error('FLAT_NOT_AVAILABLE')
@@ -273,6 +277,10 @@ export async function bookFlatForUser(
           customFlatId: flat.customFlatId,
           floorNumber: flat.floor.floorNumber,
           floorName: flat.floor.floorName,
+          wingId: flat.floor.wingId ?? null,
+          wingName: flat.floor.wing?.name ?? null,
+          unitType: flat.unitType ?? null,
+          flatType: flat.flatType,
           flatStatus: newStatus,
           amountPaid,
           remaining,
@@ -314,6 +322,10 @@ export async function bookFlatForUser(
       },
       customFlatId: bookingResult.customFlatId,
       floorName: bookingResult.floorName,
+      wingId: bookingResult.wingId,
+      wingName: bookingResult.wingName,
+      unitType: bookingResult.unitType,
+      flatType: bookingResult.flatType,
     }),
   }
 }
@@ -330,7 +342,7 @@ export async function getSiteCustomersForUser(siteId: string, userId: string) {
     where: { siteId: site.id, isDeleted: false, dealStatus: 'ACTIVE' },
     include: {
       ledgerEntries: { select: { amount: true, direction: true } },
-      flat: { include: { floor: true } },
+      flat: { include: { floor: { include: { wing: true } } } },
     },
     orderBy: { createdAt: 'desc' },
   })
@@ -355,7 +367,7 @@ export async function getFlatCustomerForUser(siteId: string, flatId: string, use
     where: { flatId, siteId: site.id, isDeleted: false, dealStatus: 'ACTIVE' },
     include: {
       ledgerEntries: { select: { amount: true, direction: true } },
-      flat: { include: { floor: true } },
+      flat: { include: { floor: { include: { wing: true } } } },
     },
   })
   if (!customer) return { error: 'No customer found for this flat', status: 404 }
@@ -396,7 +408,7 @@ export async function updateCustomerForUser(
       data: profileData,
       include: {
         ledgerEntries: { select: { amount: true, direction: true } },
-        flat: { include: { floor: true } },
+        flat: { include: { floor: { include: { wing: true } } } },
       },
     })
 
@@ -499,7 +511,7 @@ export async function cancelDealForUser(
         where: { id: customerId, flatId, siteId: site.id, isDeleted: false, dealStatus: 'ACTIVE' },
         include: {
           ledgerEntries: { select: { amount: true, direction: true } },
-          flat: { include: { floor: true } },
+          flat: { include: { floor: { include: { wing: true } } } },
         },
       })
       if (!customer || !customer.flat) throw new Error('CUSTOMER_NOT_FOUND')
@@ -557,7 +569,7 @@ export async function cancelDealForUser(
         },
         include: {
           ledgerEntries: { select: { amount: true, direction: true } },
-          flat: { include: { floor: true } },
+          flat: { include: { floor: { include: { wing: true } } } },
         },
       })
 

@@ -6,12 +6,19 @@ type LedgerEntry = {
 }
 
 type CustomerFlat = {
+  id?: string | null
   flatNumber: number | null
   customFlatId?: string | null
+  unitType?: string | null
+  flatType?: string | null
   status: string
   floor: {
     floorNumber: number | null
     floorName?: string | null
+    wing?: {
+      id: string
+      name: string
+    } | null
   } | null
 } | null
 
@@ -50,6 +57,10 @@ function getCustomerFlatState(customer: CustomerForResponse) {
     flatStatus: customer.flat?.status ?? null,
     customFlatId: customer.flat?.customFlatId ?? null,
     floorName: customer.flat?.floor?.floorName ?? null,
+    wingId: customer.flat?.floor?.wing?.id ?? null,
+    wingName: customer.flat?.floor?.wing?.name ?? null,
+    unitType: customer.flat?.unitType ?? null,
+    flatType: customer.flat?.flatType ?? null,
   }
 }
 
@@ -131,6 +142,10 @@ export function mapBookingCustomerResponse(input: {
   flatStatus: string
   customFlatId?: string | null
   floorName?: string | null
+  wingId?: string | null
+  wingName?: string | null
+  unitType?: string | null
+  flatType?: string | null
   amountPaid: number
   remaining: number
 }) {
@@ -151,6 +166,10 @@ export function mapBookingCustomerResponse(input: {
     flatStatus: input.flatStatus,
     customFlatId: input.customFlatId ?? null,
     floorName: input.floorName ?? null,
+    wingId: input.wingId ?? null,
+    wingName: input.wingName ?? null,
+    unitType: input.unitType ?? null,
+    flatType: input.flatType ?? null,
     cancelledAt: input.customer.cancelledAt ?? null,
     cancellationReason: input.customer.cancellationReason ?? null,
     cancelledByUserId: input.customer.cancelledByUserId ?? null,
