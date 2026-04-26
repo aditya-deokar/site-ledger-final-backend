@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 
+import { Prisma } from '@prisma/client'
 import { prisma } from '../../db/prisma.js'
 import { generateUniqueSlug } from '../../utils/slug.js'
 import {
@@ -215,65 +216,160 @@ export async function getSitesForUser(userId: string, showArchived?: 'true' | 'f
   else if (showArchived === 'true') isActiveFilter = undefined
   else isActiveFilter = true
 
+  // Fetch sites with only required fields to minimize data transfer
   const sites = await prisma.site.findMany({
     where: {
       companyId: company.id,
       ...(isActiveFilter !== undefined ? { isActive: isActiveFilter } : {}),
     },
-    include: {
-      floors: { select: { flats: { select: { status: true } } } },
+    select: {
+      id: true,
+      name: true,
+      address: true,
+      projectType: true,
+      totalFloors: true,
+      totalFlats: true,
+      slug: true,
+      isActive: true,
+      createdAt: true,
     },
     orderBy: { createdAt: 'desc' },
   })
 
-  const siteSummaries = await Promise.all(
-    sites.map(async (site) => {
-      const [partnerAllocatedFund, investorAllocatedFund, totalExpenses, totalExpensesBilled, customerPayments, remainingFund, agreementFinancials] = await Promise.all([
-        getSitePartnerAllocatedFund(site.id),
-        getSiteEquityInvestorFund(site.id),
-        getSiteTotalExpenses(site.id),
-        getSiteTotalExpensesBilled(site.id),
-        getSiteCustomerPayments(site.id),
-        getSiteRemainingFund(site.id),
-        getSiteAgreementFinancials(site.id),
-      ])
+  if (sites.length === 0) {
+    const responseData = { sites: [] }
+    await cacheService.set(cacheKey, responseData, CacheTTL.SITE_LIST)
+    return responseData
+  }
 
-      const allocatedFund = partnerAllocatedFund + investorAllocatedFund
-      const totalRevenue = agreementFinancials.profitRevenue
-      const totalProfit = totalRevenue - totalExpensesBilled
-      const flatsSummary = { available: 0, booked: 0, sold: 0 }
-      for (const floor of site.floors) {
-        for (const flat of floor.flats) {
-          if (flat.status === 'AVAILABLE') flatsSummary.available++
-          else if (flat.status === 'BOOKED') flatsSummary.booked++
-          else if (flat.status === 'SOLD') flatsSummary.sold++
-        }
-      }
-
-      return {
-        id: site.id,
-        name: site.name,
-        address: site.address,
-        projectType: site.projectType,
-        totalFloors: site.totalFloors,
-        totalFlats: site.totalFlats,
-        slug: site.slug,
-        isActive: site.isActive,
-        partnerAllocatedFund,
-        investorAllocatedFund,
-        allocatedFund,
-        totalExpenses,
-        customerPayments,
-        remainingFund,
-        totalProfit,
-        flatsSummary,
-        createdAt: site.createdAt,
-      }
+  // Batch all fund calculations using raw SQL for maximum performance
+  const siteIds = sites.map(s => s.id)
+  
+  // Run all queries in parallel for maximum performance
+  const [flatStatusCounts, fundMetrics, expensesBilled, agreementFinancials] = await Promise.all([
+    // Batch flat status counts for all sites
+    prisma.flat.groupBy({
+      by: ['siteId', 'status'],
+      where: { siteId: { in: siteIds } },
+      _count: true,
     }),
+    
+    // Simplified raw SQL query - calculate only essential metrics
+    prisma.$queryRaw<Array<{
+      siteId: string
+      partnerAllocatedFund: bigint
+      investorIn: bigint
+      investorOut: bigint
+      expensesOut: bigint
+      customerPaymentsIn: bigint
+      totalIn: bigint
+      totalOut: bigint
+    }>>`
+      SELECT 
+        p."siteId",
+        COALESCE(SUM(CASE WHEN p."movementType" = 'COMPANY_TO_SITE_TRANSFER' AND p."direction" = 'IN' THEN p."amount" ELSE 0 END), 0) as "partnerAllocatedFund",
+        COALESCE(SUM(CASE WHEN p."investorTransactionId" IS NOT NULL AND p."direction" = 'IN' THEN p."amount" ELSE 0 END), 0) as "investorIn",
+        COALESCE(SUM(CASE WHEN p."investorTransactionId" IS NOT NULL AND p."direction" = 'OUT' THEN p."amount" ELSE 0 END), 0) as "investorOut",
+        COALESCE(SUM(CASE WHEN p."expenseId" IS NOT NULL AND p."direction" = 'OUT' THEN p."amount" ELSE 0 END), 0) as "expensesOut",
+        COALESCE(SUM(CASE WHEN p."customerId" IS NOT NULL AND p."direction" = 'IN' THEN p."amount" ELSE 0 END), 0) as "customerPaymentsIn",
+        COALESCE(SUM(CASE WHEN p."direction" = 'IN' THEN p."amount" ELSE 0 END), 0) as "totalIn",
+        COALESCE(SUM(CASE WHEN p."direction" = 'OUT' THEN p."amount" ELSE 0 END), 0) as "totalOut"
+      FROM "Payment" p
+      WHERE p."siteId" IN (${Prisma.join(siteIds)}) AND p."walletType" = 'SITE'
+      GROUP BY p."siteId"
+    `,
+    
+    // Batch expenses billed
+    prisma.expense.groupBy({
+      by: ['siteId'],
+      where: { siteId: { in: siteIds }, isDeleted: false },
+      _sum: { amount: true },
+    }),
+    
+    // Batch agreement financials
+    prisma.customer.groupBy({
+      by: ['siteId'],
+      where: { 
+        siteId: { in: siteIds }, 
+        isDeleted: false, 
+        dealStatus: 'ACTIVE' 
+      },
+      _sum: { sellingPrice: true },
+    }),
+  ])
+
+  // Create lookup maps
+  const fundMetricsMap = new Map(
+    fundMetrics.map(m => [m.siteId, {
+      partnerAllocatedFund: Number(m.partnerAllocatedFund),
+      investorAllocatedFund: Number(m.investorIn) - Number(m.investorOut),
+      totalExpenses: Number(m.expensesOut),
+      customerPayments: Number(m.customerPaymentsIn),
+      remainingFund: Number(m.totalIn) - Number(m.totalOut),
+    }])
   )
+
+  const expensesBilledMap = new Map(
+    expensesBilled.map(e => [e.siteId, Number(e._sum.amount ?? 0)])
+  )
+
+  const agreementFinancialsMap = new Map(
+    agreementFinancials.map(a => [a.siteId, Number(a._sum.sellingPrice ?? 0)])
+  )
+
+  // Create flat status summary map
+  const flatStatusMap = new Map<string, { available: number; booked: number; sold: number }>()
+  for (const count of flatStatusCounts) {
+    if (!flatStatusMap.has(count.siteId)) {
+      flatStatusMap.set(count.siteId, { available: 0, booked: 0, sold: 0 })
+    }
+    const summary = flatStatusMap.get(count.siteId)!
+    if (count.status === 'AVAILABLE') summary.available = count._count
+    else if (count.status === 'BOOKED') summary.booked = count._count
+    else if (count.status === 'SOLD') summary.sold = count._count
+  }
+
+  // Map sites to summaries
+  const siteSummaries = sites.map((site) => {
+    const metrics = fundMetricsMap.get(site.id) ?? {
+      partnerAllocatedFund: 0,
+      investorAllocatedFund: 0,
+      totalExpenses: 0,
+      customerPayments: 0,
+      remainingFund: 0,
+    }
+    
+    const totalExpensesBilled = expensesBilledMap.get(site.id) ?? 0
+    const totalRevenue = agreementFinancialsMap.get(site.id) ?? 0
+    const allocatedFund = metrics.partnerAllocatedFund + metrics.investorAllocatedFund
+    const totalProfit = totalRevenue - totalExpensesBilled
+    
+    const flatsSummary = flatStatusMap.get(site.id) ?? { available: 0, booked: 0, sold: 0 }
+
+    return {
+      id: site.id,
+      name: site.name,
+      address: site.address,
+      projectType: site.projectType,
+      totalFloors: site.totalFloors,
+      totalFlats: site.totalFlats,
+      slug: site.slug,
+      isActive: site.isActive,
+      partnerAllocatedFund: metrics.partnerAllocatedFund,
+      investorAllocatedFund: metrics.investorAllocatedFund,
+      allocatedFund,
+      totalExpenses: metrics.totalExpenses,
+      customerPayments: metrics.customerPayments,
+      remainingFund: metrics.remainingFund,
+      totalProfit,
+      flatsSummary,
+      createdAt: site.createdAt,
+    }
+  })
 
   const responseData = { sites: siteSummaries }
   await cacheService.set(cacheKey, responseData, CacheTTL.SITE_LIST)
+  
   return responseData
 }
 
