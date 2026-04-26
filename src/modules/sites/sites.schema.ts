@@ -12,6 +12,7 @@ export const createSiteSchema = z.object({
   totalFloors: z.number().int().min(1).optional(),
   totalFlats: z.number().int().min(1).optional(),
   hasMultipleWings: z.boolean().optional().default(false),
+  includeGroundFloor: z.boolean().optional().default(false),
   wings: z.array(createSiteWingSchema).optional(),
 }).superRefine((data, ctx) => {
   const hasConfiguredWings = (data.wings?.length ?? 0) > 0

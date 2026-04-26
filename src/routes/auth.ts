@@ -7,6 +7,7 @@ import {
   signRefreshToken,
   verifyPassword,
   verifyRefreshToken,
+  verifyRecaptcha,
 } from '../services/auth.service.js'
 import {
   EMAIL_VALIDATION_REGEX,
@@ -30,11 +31,13 @@ const signUpSchema = z.object({
   password: z.string().min(1, 'Password is required.'),
   firstName: z.string().optional(),
   lastName: z.string().optional(),
+  recaptchaToken: z.string().optional(),
 })
 
 const signInSchema = z.object({
   email: z.string().regex(EMAIL_VALIDATION_REGEX, 'Invalid email format'),
   password: z.string().min(1, 'Password is required.'),
+  recaptchaToken: z.string().optional(),
 })
 
 const resetPasswordBodySchema = z.object({
@@ -114,7 +117,7 @@ authRoutes.openapi(signUpRoute, async (c) => {
     return jsonError(c, getValidationErrorMessage(parsed.error), 400) as any
   }
 
-  const { email, password } = parsed.data
+  const { email, password, recaptchaToken } = parsed.data
   const firstName = parsed.data.firstName?.trim() || undefined
   const lastName = parsed.data.lastName?.trim() || undefined
   const passwordError = getPasswordValidationMessage(password)
@@ -124,6 +127,11 @@ authRoutes.openapi(signUpRoute, async (c) => {
   }
 
   try {
+    // const isHuman = await verifyRecaptcha(recaptchaToken)
+    // if (!isHuman) {
+    //   return jsonError(c, 'Invalid captcha. Please try again.', 400) as any
+    // }
+
     const existing = await prisma.user.findUnique({
       where: { email },
     })
@@ -312,38 +320,48 @@ authRoutes.openapi(signInRoute, async (c) => {
     return jsonError(c, getValidationErrorMessage(parsed.error), 400) as any
   }
 
-  const user = await prisma.user.findUnique({
-    where: { email: parsed.data.email },
-  })
+  try {
+    // const isHuman = await verifyRecaptcha(parsed.data.recaptchaToken)
+    // if (!isHuman) {
+    //   return jsonError(c, 'Invalid captcha. Please try again.', 400) as any
+    // }
 
-  if (!user) {
-    return jsonError(c, 'Invalid credentials', 401) as any
+    const user = await prisma.user.findUnique({
+      where: { email: parsed.data.email },
+    })
+
+    if (!user) {
+      return jsonError(c, 'Invalid credentials', 401) as any
+    }
+
+    const ok = await verifyPassword(parsed.data.password, user.passwordHash)
+    if (!ok) {
+      return jsonError(c, 'Invalid credentials', 401) as any
+    }
+
+    const accessToken = signAccessToken({ sub: user.id, email: user.email })
+    const refreshToken = signRefreshToken({ sub: user.id })
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { refreshToken },
+    })
+
+    return jsonOk(c, {
+      accessToken,
+      refreshToken,
+      user: {
+        id: user.id,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        createdAt: user.createdAt,
+      },
+    }) as any
+  } catch (error) {
+    console.error('SignIn Error:', error)
+    return jsonError(c, 'An error occurred while connecting to the database. Please try again.', 500) as any
   }
-
-  const ok = await verifyPassword(parsed.data.password, user.passwordHash)
-  if (!ok) {
-    return jsonError(c, 'Invalid credentials', 401) as any
-  }
-
-  const accessToken = signAccessToken({ sub: user.id, email: user.email })
-  const refreshToken = signRefreshToken({ sub: user.id })
-
-  await prisma.user.update({
-    where: { id: user.id },
-    data: { refreshToken },
-  })
-
-  return jsonOk(c, {
-    accessToken,
-    refreshToken,
-    user: {
-      id: user.id,
-      email: user.email,
-      firstName: user.firstName,
-      lastName: user.lastName,
-      createdAt: user.createdAt,
-    },
-  }) as any
 })
 
 

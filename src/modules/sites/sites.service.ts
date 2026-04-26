@@ -75,9 +75,11 @@ export async function createSiteForUser(
     totalFloors?: number
     totalFlats?: number
     hasMultipleWings?: boolean
+    includeGroundFloor?: boolean
     wings?: Array<{
       name: string
       floorCount: number
+      includeGroundFloor?: boolean
     }>
   },
 ) {
@@ -90,6 +92,7 @@ export async function createSiteForUser(
     .map((wing) => ({
       name: wing.name.trim(),
       floorCount: wing.floorCount,
+      includeGroundFloor: !!wing.includeGroundFloor,
     }))
     .filter((wing) => wing.name.length > 0 && wing.floorCount > 0)
   const hasWings = configuredWings.length > 0
@@ -123,7 +126,11 @@ export async function createSiteForUser(
           siteId,
           wingId: wingRecord.id,
           floorNumber: floorIndex + 1,
-          floorName: getDefaultFloorName(floorIndex),
+          floorName: wing.includeGroundFloor
+            ? floorIndex === 0
+              ? 'Ground Floor'
+              : `Floor ${floorIndex}`
+            : `Floor ${floorIndex + 1}`,
         }))
       })
     : Array.from({ length: totalFloors }, (_, floorIndex) => ({
@@ -131,7 +138,11 @@ export async function createSiteForUser(
         siteId,
         wingId: null as string | null,
         floorNumber: floorIndex + 1,
-        floorName: null as string | null,
+        floorName: data.includeGroundFloor
+          ? floorIndex === 0
+            ? 'Ground Floor'
+            : `Floor ${floorIndex}`
+          : `Floor ${floorIndex + 1}`,
       }))
 
   const flatRecords = floorRecords.flatMap((floor, floorIndex) => {
