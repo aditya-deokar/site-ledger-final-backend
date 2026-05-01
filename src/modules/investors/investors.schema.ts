@@ -1,6 +1,7 @@
 import { z } from '@hono/zod-openapi'
 
 export const investorTypeEnum = z.enum(['EQUITY', 'FIXED_RATE'])
+export const fixedRateCadenceEnum = z.enum(['YEARLY', 'MONTHLY'])
 export const investorTransactionKindEnum = z.enum(['PRINCIPAL_IN', 'PRINCIPAL_OUT', 'INTEREST'])
 export const paymentStatusEnum = z.enum(['PENDING', 'PARTIAL', 'COMPLETED'])
 
@@ -11,6 +12,25 @@ export const createInvestorSchema = z.object({
   siteId: z.string().optional(),
   equityPercentage: z.number().min(0).max(100).optional(),
   fixedRate: z.number().min(0).optional(),
+  fixedRateCadence: fixedRateCadenceEnum.optional(),
+}).superRefine((data, ctx) => {
+  if (data.type === 'FIXED_RATE') {
+    if (data.fixedRate === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'fixedRate is required for fixed-rate investors',
+        path: ['fixedRate'],
+      })
+    }
+
+    if (data.fixedRateCadence === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'fixedRateCadence is required for fixed-rate investors',
+        path: ['fixedRateCadence'],
+      })
+    }
+  }
 })
 
 export const updateInvestorSchema = z.object({
@@ -18,6 +38,7 @@ export const updateInvestorSchema = z.object({
   phone: z.string().optional(),
   equityPercentage: z.number().min(0).max(100).optional(),
   fixedRate: z.number().min(0).optional(),
+  fixedRateCadence: fixedRateCadenceEnum.optional(),
 })
 
 export const addTransactionSchema = z.object({
@@ -43,6 +64,7 @@ export const investorResponseSchema = z.object({
   siteName: z.string().nullable(),
   equityPercentage: z.number().nullable(),
   fixedRate: z.number().nullable(),
+  fixedRateCadence: fixedRateCadenceEnum.nullable(),
   totalInvested: z.number(),
   totalReturned: z.number(),
   interestPaid: z.number(),

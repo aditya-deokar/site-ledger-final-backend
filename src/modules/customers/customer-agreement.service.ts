@@ -56,6 +56,43 @@ function defaultAffectsProfit(type: CustomerAgreementLineType) {
   return type !== 'TAX'
 }
 
+function normalizeCurrencyAmount(value: number) {
+  return Math.round(value * 100) / 100
+}
+
+function hasRateBasedCalculation(data: CustomerAgreementLineInput) {
+  return data.type === 'TAX' || (data.type === 'DISCOUNT' && data.ratePercent !== undefined && data.ratePercent > 0)
+}
+
+function resolveAgreementLineAmount(data: CustomerAgreementLineInput) {
+  if (!hasRateBasedCalculation(data)) return normalizeCurrencyAmount(data.amount)
+
+  const calculationBase = data.calculationBase ?? 0
+  return normalizeCurrencyAmount(calculationBase * ((data.ratePercent ?? 0) / 100))
+}
+
+function validateAgreementLineInput(data: CustomerAgreementLineInput) {
+  if (data.type === 'TAX' && (data.ratePercent === undefined || data.ratePercent <= 0)) {
+    return {
+      error: 'Tax lines must include a percentage greater than zero.',
+      status: 400 as const,
+    }
+  }
+
+  if (data.type === 'DISCOUNT') {
+    const hasRatePercent = data.ratePercent !== undefined && data.ratePercent > 0
+    const hasFixedAmount = normalizeCurrencyAmount(data.amount) > 0
+    if (!hasRatePercent && !hasFixedAmount) {
+      return {
+        error: 'Discount needs a fixed amount or percentage.',
+        status: 400 as const,
+      }
+    }
+  }
+
+  return null
+}
+
 export function getAgreementLineSignedAmount(line: Pick<AgreementLineLike, 'type' | 'amount'>) {
   const amount = toMoney(line.amount)
   return line.type === 'DISCOUNT' || line.type === 'CREDIT' ? -amount : amount
@@ -244,7 +281,7 @@ function normalizeLineInput(data: CustomerAgreementLineInput) {
   return {
     type: data.type,
     label,
-    amount: new Prisma.Decimal(data.amount),
+    amount: new Prisma.Decimal(resolveAgreementLineAmount(data)),
     ratePercent: data.ratePercent ?? null,
     calculationBase: data.calculationBase !== undefined ? new Prisma.Decimal(data.calculationBase) : null,
     affectsProfit,
@@ -286,6 +323,9 @@ export async function addAgreementLineForUser(customerId: string, userId: string
   const { company, customer } = await getCustomerForUser(customerId, userId)
   if (!company) return { error: 'Company not found', status: 404 as const }
   if (!customer) return { error: 'Customer not found', status: 404 as const }
+
+  const validationError = validateAgreementLineInput(data)
+  if (validationError) return validationError
 
   if (data.type === 'BASE_PRICE') {
     const existingBaseLine = await prisma.customerAgreementLine.findFirst({
@@ -338,6 +378,9 @@ export async function updateAgreementLineForUser(
   const { company, customer } = await getCustomerForUser(customerId, userId)
   if (!company) return { error: 'Company not found', status: 404 as const }
   if (!customer) return { error: 'Customer not found', status: 404 as const }
+
+  const validationError = validateAgreementLineInput(data)
+  if (validationError) return validationError
 
   const existing = await prisma.customerAgreementLine.findFirst({
     where: { id: lineId, customerId, isDeleted: false },

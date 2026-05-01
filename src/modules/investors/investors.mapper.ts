@@ -40,6 +40,8 @@ export function mapInvestorResponse(investor: InvestorWithLedger) {
     siteName: investor.site?.name ?? null,
     equityPercentage: investor.equityPercentage,
     fixedRate: investor.fixedRate,
+    fixedRateCadence:
+      investor.type === 'FIXED_RATE' ? investor.fixedRateCadence ?? 'YEARLY' : null,
     totalInvested: totals.principalInTotal,
     totalReturned: totals.totalReturned,
     interestPaid: totals.interestTotal,

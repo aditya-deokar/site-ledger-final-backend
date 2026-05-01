@@ -98,6 +98,7 @@ export async function createInvestorForUser(
     siteId?: string
     equityPercentage?: number
     fixedRate?: number
+    fixedRateCadence?: 'YEARLY' | 'MONTHLY'
   },
 ): Promise<{ investor: InvestorView } | InvestorServiceError> {
   const company = await getCompanyForUser(userId)
@@ -119,6 +120,13 @@ export async function createInvestorForUser(
     }
   }
 
+  if (data.type === 'FIXED_RATE' && (data.fixedRate === undefined || !data.fixedRateCadence)) {
+    return {
+      error: 'Fixed-rate investors require both fixedRate and fixedRateCadence.',
+      status: 400,
+    }
+  }
+
   const investor = await prisma.investor.create({
     data: {
       companyId: company.id,
@@ -128,6 +136,7 @@ export async function createInvestorForUser(
       type: data.type,
       equityPercentage: data.type === 'EQUITY' ? data.equityPercentage : null,
       fixedRate: data.type === 'FIXED_RATE' ? data.fixedRate : null,
+      fixedRateCadence: data.type === 'FIXED_RATE' ? data.fixedRateCadence : null,
     },
   })
 
@@ -168,14 +177,39 @@ export async function updateInvestorForUser(
     phone?: string
     equityPercentage?: number
     fixedRate?: number
+    fixedRateCadence?: 'YEARLY' | 'MONTHLY'
   },
 ) {
   const { company, investor } = await getInvestorForUser(investorId, userId)
   if (!company || !investor) return null
 
+  const updateData: Prisma.InvestorUpdateInput = {
+    ...(data.name !== undefined ? { name: data.name } : {}),
+    ...(data.phone !== undefined ? { phone: data.phone } : {}),
+  }
+
+  if (investor.type === 'EQUITY') {
+    if (data.equityPercentage !== undefined) {
+      updateData.equityPercentage = data.equityPercentage
+    }
+  } else {
+    const nextFixedRate = data.fixedRate ?? investor.fixedRate
+    const nextFixedRateCadence = data.fixedRateCadence ?? investor.fixedRateCadence ?? 'YEARLY'
+
+    if (nextFixedRate === null || nextFixedRate === undefined || !nextFixedRateCadence) {
+      return {
+        error: 'Fixed-rate investors require both fixedRate and fixedRateCadence.',
+        status: 400,
+      }
+    }
+
+    updateData.fixedRate = nextFixedRate
+    updateData.fixedRateCadence = nextFixedRateCadence
+  }
+
   const updated = await prisma.investor.update({
     where: { id: investorId },
-    data,
+    data: updateData,
   })
 
   await invalidateInvestorCaches(company.id, updated.siteId)

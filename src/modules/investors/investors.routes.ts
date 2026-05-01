@@ -170,7 +170,7 @@ const updateInvestorRoute = createRoute({
   path: '/{id}',
   tags: ['Investors'],
   summary: 'Update investor details',
-  description: 'Update investor name, phone, equity percentage, or fixed rate.',
+  description: 'Update investor name, phone, equity percentage, or fixed-rate terms.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ id: z.string() }),
@@ -207,6 +207,7 @@ investorRoutes.openapi(updateInvestorRoute, async (c) => {
   if (!parsed.success) return jsonError(c, 'Invalid request body', 400) as any
 
   const result = await updateInvestorForUser(id, auth.userId, parsed.data)
+  if (isInvestorServiceError(result)) return jsonError(c, result.error, result.status) as any
   if (!result) return jsonError(c, 'Investor not found', 404) as any
 
   return jsonOk(c, result) as any

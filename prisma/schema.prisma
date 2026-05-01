@@ -230,6 +230,7 @@ model Investor {
   type             InvestorType
   equityPercentage Float?
   fixedRate        Float?
+  fixedRateCadence InvestorFixedRateCadence?
   createdAt        DateTime              @default(now())
   updatedAt        DateTime              @updatedAt
   isClosed         Boolean               @default(false)
@@ -445,6 +446,11 @@ enum CustomerAgreementLineType {
 enum InvestorType {
   EQUITY
   FIXED_RATE
+}
+
+enum InvestorFixedRateCadence {
+  YEARLY
+  MONTHLY
 }
 
 enum MovementType {
