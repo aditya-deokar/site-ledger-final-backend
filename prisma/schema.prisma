@@ -39,25 +39,35 @@ enum VerificationType {
 }
 
 model Company {
-  id          String              @id @default(cuid())
-  name        String
-  address     String?
-  phone       String?
-  email       String?
-  gstin       String?
-  logo        String?
-  createdBy   String              @unique
-  createdAt   DateTime            @default(now())
-  updatedAt   DateTime            @updatedAt
-  owner       User                @relation(fields: [createdBy], references: [id])
-  withdrawals CompanyWithdrawal[]
-  customers   Customer[]
-  investors   Investor[]
-  partners    Partner[]
-  payments    Payment[]
-  sites       Site[]
-  vendors     Vendor[]
-  employees   Employee[]
+  id                 String              @id @default(cuid())
+  name               String
+  tradeName          String?
+  address            String?
+  phone              String?
+  email              String?
+  gstin              String?
+  pan                String?
+  tan                String?
+  cin                String?
+  reraNumber         String?
+  msmeUdyamNumber    String?
+  epfNumber          String?
+  esicNumber         String?
+  bocwNumber         String?
+  logo               String?
+  receiptSettings    Json?               @db.JsonB
+  createdBy          String              @unique
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  owner              User                @relation(fields: [createdBy], references: [id])
+  withdrawals        CompanyWithdrawal[]
+  customers          Customer[]
+  investors          Investor[]
+  partners           Partner[]
+  payments           Payment[]
+  sites              Site[]
+  vendors            Vendor[]
+  employees          Employee[]
 }
 
 model Partner {
