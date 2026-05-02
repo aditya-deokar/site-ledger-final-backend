@@ -50,19 +50,52 @@ async function invalidateSalaryPaymentCaches(companyId: string) {
   ])
 }
 
+async function ensureSalaryRemindersForPeriod(companyId: string, month: number, year: number) {
+  const employees = await prisma.employee.findMany({
+    where: {
+      companyId,
+      isDeleted: false,
+      status: { in: ['ACTIVE', 'INACTIVE'] },
+    },
+    select: { id: true, salary: true },
+  })
+
+  if (employees.length === 0) return
+
+  const dueDate = getDueDate(year, month)
+
+  await prisma.salaryReminder.createMany({
+    data: employees.map((employee) => ({
+      employeeId: employee.id,
+      month,
+      year,
+      salaryAmount: employee.salary,
+      dueDate,
+      status: 'PENDING',
+      reminderSent: false,
+    })),
+    skipDuplicates: true,
+  })
+}
+
 export async function getSalaryRemindersForUser(userId: string, filters: SalaryReminderQuery) {
   const company = await getCompanyForUser(userId)
   if (!company) return { error: 'No company found. Create one first.', status: 404 }
 
   const now = new Date()
+  const targetMonth = filters.month ?? now.getMonth() + 1
+  const targetYear = filters.year ?? now.getFullYear()
+
+  await ensureSalaryRemindersForPeriod(company.id, targetMonth, targetYear)
+
   const reminders = await prisma.salaryReminder.findMany({
     where: {
       employee: {
         companyId: company.id,
         isDeleted: false,
       },
-      ...(filters.month ? { month: filters.month } : {}),
-      ...(filters.year ? { year: filters.year } : {}),
+      month: targetMonth,
+      year: targetYear,
       ...(filters.status
         ? filters.status === 'overdue'
           ? {
