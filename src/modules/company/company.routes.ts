@@ -14,10 +14,21 @@ import {
 } from './company.service.js'
 import { registerCompanyWithdrawalRoutes } from './company-withdrawals.routes.js'
 import { registerCompanyPartnerRoutes } from './company-partners.routes.js'
+import { resolveCompanyLogoUrl } from '../../services/s3-upload.service.js'
 
 export const companyRoutes = new OpenAPIHono<{ Variables: AuthContext['Variables'] }>()
 
 companyRoutes.use('*', requireJwt)
+
+function withResolvedLogo<T extends { company: { logo?: string | null } }>(result: T, requestOrigin: string): T {
+  return {
+    ...result,
+    company: {
+      ...result.company,
+      logo: resolveCompanyLogoUrl(result.company.logo, requestOrigin),
+    },
+  }
+}
 
 const createCompanyRoute = createRoute({
   method: 'post',
@@ -71,7 +82,7 @@ companyRoutes.openapi(createCompanyRoute, async (c) => {
   const result = await createCompanyForUser(auth.userId, parsed.data)
   if (isCompanyServiceError(result)) return jsonError(c, result.error, result.status) as any
 
-  return jsonOk(c, result, 201) as any
+  return jsonOk(c, withResolvedLogo(result, new URL(c.req.url).origin), 201) as any
 })
 
 const getCompanyRoute = createRoute({
@@ -127,7 +138,7 @@ companyRoutes.openapi(getCompanyRoute, async (c) => {
   const result = await getCompanySummaryForUser(auth.userId)
   if (isCompanyServiceError(result)) return jsonError(c, result.error, result.status) as any
 
-  return jsonOk(c, result) as any
+  return jsonOk(c, withResolvedLogo(result, new URL(c.req.url).origin)) as any
 })
 
 const updateCompanyRoute = createRoute({
@@ -183,7 +194,7 @@ companyRoutes.openapi(updateCompanyRoute, async (c) => {
   const result = await updateCompanyForUser(auth.userId, parsed.data)
   if (isCompanyServiceError(result)) return jsonError(c, result.error, result.status) as any
 
-  return jsonOk(c, result) as any
+  return jsonOk(c, withResolvedLogo(result, new URL(c.req.url).origin)) as any
 })
 
 const deleteCompanyRoute = createRoute({

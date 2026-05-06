@@ -5,31 +5,55 @@ import { VERIFICATION_CODE_EXPIRY_MINUTES } from '../constants/auth.constants.js
 const env = loadEnv();
 
 /**
- * Creates a transporter for sending emails.
+ * Creates a transporter for sending emails when SMTP is configured.
  */
-const transporter = nodemailer.createTransport({
-  host: env.SMTP_HOST || 'smtp.ethereal.email', // Using ethereal for dev if no SMTP config is provided
-  port: env.SMTP_PORT || 587,
-  auth: {
-    user: env.SMTP_USER || '',
-    pass: env.SMTP_PASS || '',
-  },
-});
+function getTransporter() {
+  if (!env.SMTP_HOST) {
+    return null;
+  }
+
+  if (!env.SMTP_USER || !env.SMTP_PASS) {
+    throw new Error('SMTP is configured, but SMTP_USER or SMTP_PASS is missing.');
+  }
+
+  const port = env.SMTP_PORT || 587;
+
+  return nodemailer.createTransport({
+    host: env.SMTP_HOST,
+    port,
+    secure: port === 465,
+    auth: {
+      user: env.SMTP_USER,
+      pass: env.SMTP_PASS,
+    },
+  });
+}
+
+function isSmtpAuthError(error: unknown) {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: string }).code === 'EAUTH'
+  );
+}
 
 /**
  * Sends a verification email containing a numeric code.
  */
 export async function sendVerificationEmail(email: string, code: string) {
-  const from = env.SMTP_FROM || 'noreply@site-ledger.com';
-  
+  const from = env.SMTP_FROM || env.SMTP_USER || 'noreply@site-ledger.com';
+
   // If no HOST is provided, log to console for development
   if (!env.SMTP_HOST) {
     console.log(`[DEV EMAIL] To: ${email}, Code: ${code}`);
     return;
   }
 
+  const transporter = getTransporter();
+
   try {
-    await transporter.sendMail({
+    await transporter?.sendMail({
       from: `"SiteLedger" <${from}>`,
       to: email,
       subject: 'Verify your account',
@@ -49,9 +73,18 @@ export async function sendVerificationEmail(email: string, code: string) {
     });
   } catch (error) {
     console.error('Failed to send email:', error);
-    // In dev, we might not want to throw and break the flow if SMTP is just misconfigured
-    if (env.NODE_ENV === 'production') {
-      throw error;
+
+    if (isSmtpAuthError(error)) {
+      throw new Error(
+        'SMTP authentication failed. Update SMTP_USER and SMTP_PASS. If you are using Gmail, SMTP_PASS must be a Google App Password.',
+        { cause: error },
+      );
     }
+
+    if (error instanceof Error) {
+      throw new Error(`Failed to send verification email: ${error.message}`, { cause: error });
+    }
+
+    throw new Error('Failed to send verification email.');
   }
 }

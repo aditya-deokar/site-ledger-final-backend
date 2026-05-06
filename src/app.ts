@@ -16,6 +16,7 @@ import { attendanceRoutes } from './routes/attendance.js'
 import { employeeTransactionRoutes } from './routes/transactions.js'
 import { salaryReminderRoutes } from './routes/reminders.js'
 import { employeeDocumentRoutes } from './routes/documents.js'
+import { uploadRoutes } from './routes/uploads.js'
 import { salaryPaymentRoutes } from './modules/employees/salary-payment.routes.js'
 import { LedgerError } from './services/ledger.service.js'
 import { jsonError } from './utils/response.js'
@@ -130,6 +131,7 @@ app.doc('/openapi.json', {
     { name: 'Employee Transactions', description: 'Track salary, bonus, deduction, and other employee transactions' },
     { name: 'Salary Reminders', description: 'Generate and track monthly salary reminders' },
     { name: 'Employee Documents', description: 'Store and retrieve employee documents and metadata' },
+    { name: 'Uploads', description: 'Upload company branding assets and other supported files' },
   ],
   components: {
     securitySchemes: {
@@ -159,6 +161,7 @@ app.route('/api/employees', salaryPaymentRoutes)
 app.route('/api/attendance', attendanceRoutes)
 app.route('/api/transactions', employeeTransactionRoutes)
 app.route('/api/documents', employeeDocumentRoutes)
+app.route('/api/uploads', uploadRoutes)
 
 app.notFound((c: Context) => jsonError(c, 'Not Found', 404))
 

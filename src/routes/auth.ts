@@ -17,11 +17,13 @@ import { requireJwt } from '../middlewares/jwt.js'
 import { jsonError, jsonOk } from '../utils/response.js'
 import { getPasswordValidationMessage } from '../utils/password-policy.js'
 import { randomBytes } from 'crypto'
+import { loadEnv } from '../config/env.js'
 
 import { VerificationService } from '../services/verification.service.js'
 import { VerificationType } from '@prisma/client'
 
 export const authRoutes = new OpenAPIHono<{ Variables: AuthContext['Variables'] }>()
+const env = loadEnv()
 
 const getValidationErrorMessage = (error: z.ZodError<unknown>, fallback = 'Invalid request body') =>
   error.issues[0]?.message || fallback
@@ -150,8 +152,12 @@ authRoutes.openapi(signUpRoute, async (c) => {
     })
 
     return jsonOk(c, { message: 'A 6-digit verification code has been sent to your email.' }) as any
-  } catch {
-    return jsonError(c, 'Failed to initiate signup', 500) as any
+  } catch (error) {
+    const message = error instanceof Error && env.NODE_ENV !== 'production'
+      ? error.message
+      : 'Failed to initiate signup'
+
+    return jsonError(c, message, 500) as any
   }
 })
 

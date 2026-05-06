@@ -19,8 +19,14 @@ export class VerificationService {
       create: { email, code, type, payload, expiresAt },
     });
 
-    // Send email
-    await sendVerificationEmail(email, code);
+    try {
+      // Send email
+      await sendVerificationEmail(email, code);
+    } catch (error) {
+      await this.cleanup(email, type);
+      throw error;
+    }
+
     return code; // Return code for response in development / testing if needed, safely handled in routes.
   }
 
