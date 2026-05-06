@@ -1,13 +1,50 @@
 import { z } from '@hono/zod-openapi'
 
 export const createCompanySchema = z.object({
-  name: z.string().min(1),
+  name: z.string().trim().min(1),
+  tradeName: z.string().optional(),
   address: z.string().optional(),
+  phone: z.string().optional(),
+  gstin: z.string().optional(),
+  pan: z.string().optional(),
+  tan: z.string().optional(),
+  cin: z.string().optional(),
+  reraNumber: z.string().optional(),
+  msmeUdyamNumber: z.string().optional(),
+  epfNumber: z.string().optional(),
+  esicNumber: z.string().optional(),
+  bocwNumber: z.string().optional(),
+  logo: z.string().url().optional(),
 })
 
 export const updateCompanySchema = z.object({
   name: z.string().min(1).optional(),
+  tradeName: z.string().optional(),
   address: z.string().optional(),
+  phone: z.string().optional(),
+  gstin: z.string().optional(),
+  pan: z.string().optional(),
+  tan: z.string().optional(),
+  cin: z.string().optional(),
+  reraNumber: z.string().optional(),
+  msmeUdyamNumber: z.string().optional(),
+  epfNumber: z.string().optional(),
+  esicNumber: z.string().optional(),
+  bocwNumber: z.string().optional(),
+  logo: z.string().url().nullable().optional(),
+})
+
+export const receiptSettingsSchema = z.object({
+  showCompanyLogo: z.boolean().optional(),
+  showGstin: z.boolean().optional(),
+  showPan: z.boolean().optional(),
+  showReraNumber: z.boolean().optional(),
+  showCorporateAddress: z.boolean().optional(),
+  showSupportContact: z.boolean().optional(),
+})
+
+export const updateReceiptSettingsSchema = z.object({
+  receiptSettings: receiptSettingsSchema,
 })
 
 export const createPartnerSchema = z.object({

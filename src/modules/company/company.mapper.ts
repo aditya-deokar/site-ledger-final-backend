@@ -5,13 +5,39 @@ import { sumDirectionalLedgerAmounts } from '../../services/ledger-read.service.
 export function mapCompanyResponse(company: {
   id: string
   name: string
+  tradeName: string | null
   address: string | null
+  phone: string | null
+  gstin: string | null
+  pan: string | null
+  tan: string | null
+  cin: string | null
+  reraNumber: string | null
+  msmeUdyamNumber: string | null
+  epfNumber: string | null
+  esicNumber: string | null
+  bocwNumber: string | null
+  logo: string | null
+  receiptSettings: Prisma.JsonValue | null
   createdAt: Date
 }) {
   return {
     id: company.id,
     name: company.name,
+    tradeName: company.tradeName,
     address: company.address,
+    phone: company.phone,
+    gstin: company.gstin,
+    pan: company.pan,
+    tan: company.tan,
+    cin: company.cin,
+    reraNumber: company.reraNumber,
+    msmeUdyamNumber: company.msmeUdyamNumber,
+    epfNumber: company.epfNumber,
+    esicNumber: company.esicNumber,
+    bocwNumber: company.bocwNumber,
+    logo: company.logo,
+    receiptSettings: company.receiptSettings ?? null,
     createdAt: company.createdAt.toISOString(),
   }
 }

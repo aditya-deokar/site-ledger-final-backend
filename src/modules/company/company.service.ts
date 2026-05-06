@@ -31,7 +31,22 @@ async function requireCompanyForUser(userId: string, message: string): Promise<C
   return company
 }
 
-export async function createCompanyForUser(userId: string, data: { name: string; address?: string }) {
+export async function createCompanyForUser(userId: string, data: {
+  name: string
+  tradeName?: string
+  address?: string
+  phone?: string
+  gstin?: string
+  pan?: string
+  tan?: string
+  cin?: string
+  reraNumber?: string
+  msmeUdyamNumber?: string
+  epfNumber?: string
+  esicNumber?: string
+  bocwNumber?: string
+  logo?: string
+}) {
   const existing = await prisma.company.findUnique({
     where: { createdBy: userId },
   })
@@ -39,8 +54,28 @@ export async function createCompanyForUser(userId: string, data: { name: string;
 
   const company = await prisma.company.create({
     data: {
-      name: data.name,
+      name: data.name.trim(),
+      tradeName: data.tradeName,
       address: data.address,
+      phone: data.phone,
+      gstin: data.gstin,
+      pan: data.pan,
+      tan: data.tan,
+      cin: data.cin,
+      reraNumber: data.reraNumber,
+      msmeUdyamNumber: data.msmeUdyamNumber,
+      epfNumber: data.epfNumber,
+      esicNumber: data.esicNumber,
+      bocwNumber: data.bocwNumber,
+      logo: data.logo,
+      receiptSettings: {
+        showCompanyLogo: true,
+        showGstin: true,
+        showPan: true,
+        showReraNumber: true,
+        showCorporateAddress: true,
+        showSupportContact: true,
+      },
       createdBy: userId,
     },
   })
@@ -90,7 +125,30 @@ export async function getCompanySummaryForUser(userId: string) {
   return responseData
 }
 
-export async function updateCompanyForUser(userId: string, data: { name?: string; address?: string }) {
+export async function updateCompanyForUser(userId: string, data: {
+  name?: string
+  tradeName?: string
+  address?: string
+  phone?: string
+  gstin?: string
+  pan?: string
+  tan?: string
+  cin?: string
+  reraNumber?: string
+  msmeUdyamNumber?: string
+  epfNumber?: string
+  esicNumber?: string
+  bocwNumber?: string
+  logo?: string | null
+  receiptSettings?: {
+    showCompanyLogo?: boolean
+    showGstin?: boolean
+    showPan?: boolean
+    showReraNumber?: boolean
+    showCorporateAddress?: boolean
+    showSupportContact?: boolean
+  }
+}) {
   const existing = await requireCompanyForUser(userId, 'No company found. Create one first.')
   if (isCompanyServiceError(existing)) return existing
 
