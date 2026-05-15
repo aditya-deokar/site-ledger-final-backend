@@ -91,9 +91,18 @@ export const createExpenseSchema = z.object({
   reason: z.string().optional(),
   vendorId: z.string().optional(),
   description: z.string().optional(),
+  billNumber: z.string().optional(),
+  billDate: z.string().datetime().optional(),
+  dueDate: z.string().datetime().optional(),
   amount: z.number().positive(),
   amountPaid: z.number().min(0).optional().default(0),
-  paymentDate: z.string().datetime().optional(),
+  paymentDate: z.string().optional().refine(
+    (v) => !v || /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(v),
+    { message: 'Invalid datetime' },
+  ).transform((v) => (v && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(v) ? `${v}:00` : v)),
+  paymentMode: z.enum(['CASH', 'CHEQUE', 'BANK_TRANSFER', 'UPI']).optional(),
+  referenceNumber: z.string().optional(),
+  note: z.string().optional(),
   idempotencyKey: z.string().optional(),
 })
 

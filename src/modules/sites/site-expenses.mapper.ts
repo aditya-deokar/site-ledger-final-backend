@@ -6,6 +6,9 @@ export function mapSiteExpense(expense: {
   reason: string | null
   vendorId: string | null
   description: string | null
+  billNumber?: string | null
+  billDate?: Date | null
+  dueDate?: Date | null
   amount: number
   createdAt: Date
   vendor?: { name: string; type: string } | null
@@ -21,6 +24,9 @@ export function mapSiteExpense(expense: {
     vendorName: expense.vendor?.name ?? null,
     vendorType: expense.vendor?.type ?? null,
     description: expense.description,
+    billNumber: expense.billNumber ?? null,
+    billDate: (expense.billDate ?? expense.createdAt).toISOString(),
+    dueDate: (expense.dueDate ?? expense.billDate ?? expense.createdAt).toISOString(),
     amount: expense.amount,
     amountPaid: ledger.amountPaid,
     remaining: ledger.remaining,
@@ -37,6 +43,14 @@ export function mapExpensePayment(payment: {
   movementType: string
   note: string | null
   postedAt: Date
+  paymentMode?: string | null
+  referenceNumber?: string | null
+  receipt?: {
+    id: string
+    receiptNumber: string
+    status: 'ACTIVE' | 'VOIDED'
+    createdAt: Date
+  } | null
   reversalOfPaymentId?: string | null
 }) {
   return {
@@ -46,6 +60,16 @@ export function mapExpensePayment(payment: {
     movementType: payment.movementType,
     reversalOfPaymentId: payment.reversalOfPaymentId ?? null,
     note: payment.note,
-    createdAt: payment.postedAt,
+    paymentMode: payment.paymentMode ?? null,
+    referenceNumber: payment.referenceNumber ?? null,
+    receipt: payment.receipt
+      ? {
+          id: payment.receipt.id,
+          receiptNumber: payment.receipt.receiptNumber,
+          status: payment.receipt.status,
+          createdAt: payment.receipt.createdAt.toISOString(),
+        }
+      : null,
+    createdAt: payment.postedAt.toISOString(),
   }
 }

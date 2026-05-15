@@ -1,34 +1,49 @@
+import { Prisma } from '@prisma/client'
 import { prisma } from '../db/prisma.js'
 import { mapExpenseLedgerFields } from './expense-ledger.service.js'
 import { sumLedgerAmountsForDirection, type LedgerReadDb } from './ledger-read.service.js'
 
-type VendorPaymentEntry = {
-  id: string
-  amount: number | string | { toString(): string }
-  direction: 'IN' | 'OUT'
-  note: string | null
-  postedAt: Date
-}
-
-type VendorExpenseRecord = {
-  id: string
-  siteId: string
-  amount: number
-  description: string | null
-  reason: string | null
-  createdAt: Date
-  site: {
-    id: string
-    name: string
+export type VendorExpenseRecord = Prisma.ExpenseGetPayload<{
+  include: {
+    site: {
+      select: {
+        id: true
+        name: true
+        address: true
+      }
+    }
+    vendorDocuments: {
+      select: {
+        id: true
+      }
+    }
+    ledgerEntries: {
+      select: {
+        id: true
+        amount: true
+        direction: true
+        note: true
+        postedAt: true
+        paymentMode: true
+        referenceNumber: true
+        receipt: {
+          select: {
+            id: true
+            receiptNumber: true
+            status: true
+            createdAt: true
+          }
+        }
+      }
+    }
   }
-  ledgerEntries: VendorPaymentEntry[]
-}
+}>
 
 type VendorStatementRow = {
   id: string
-  entryType: 'BILL' | 'PAYMENT'
+  entryType: 'OPENING_BALANCE' | 'BILL' | 'PAYMENT'
   referenceId: string
-  expenseId: string
+  expenseId: string | null
   date: string
   billAmount: number
   paymentAmount: number
@@ -36,8 +51,20 @@ type VendorStatementRow = {
   description: string | null
   reason: string | null
   note: string | null
-  siteId: string
-  siteName: string
+  siteId: string | null
+  siteName: string | null
+  billNumber: string | null
+  dueDate: string | null
+  paymentMode: 'CASH' | 'CHEQUE' | 'BANK_TRANSFER' | 'UPI' | null
+  referenceNumber: string | null
+}
+
+function toIsoOrNull(value?: Date | null) {
+  return value ? value.toISOString() : null
+}
+
+function getEffectiveBillDate(expense: Pick<VendorExpenseRecord, 'billDate' | 'createdAt'>) {
+  return expense.billDate ?? expense.createdAt
 }
 
 export async function getVendorExpenseRecords(
@@ -46,7 +73,7 @@ export async function getVendorExpenseRecords(
 ): Promise<VendorExpenseRecord[]> {
   const db = tx ?? prisma
 
-  return db.expense.findMany({
+  const expenses = await db.expense.findMany({
     where: {
       vendorId,
       isDeleted: false,
@@ -58,6 +85,11 @@ export async function getVendorExpenseRecords(
           name: true,
         },
       },
+      vendorDocuments: {
+        select: {
+          id: true,
+        },
+      },
       ledgerEntries: {
         select: {
           id: true,
@@ -65,27 +97,67 @@ export async function getVendorExpenseRecords(
           direction: true,
           note: true,
           postedAt: true,
+          paymentMode: true,
+          referenceNumber: true,
+          receipt: {
+            select: {
+              id: true,
+              receiptNumber: true,
+              status: true,
+              createdAt: true,
+            },
+          },
         },
         orderBy: {
           postedAt: 'desc',
         },
       },
     },
-    orderBy: {
-      createdAt: 'desc',
-    },
+    orderBy: [
+      { billDate: 'desc' },
+      { createdAt: 'desc' },
+    ],
   })
+
+  return expenses as VendorExpenseRecord[]
 }
 
-export function summarizeVendorRecords(expenses: VendorExpenseRecord[]) {
+export function summarizeVendorRecords(
+  expenses: VendorExpenseRecord[],
+  openingBalanceAmount = 0,
+) {
   const totalBilled = expenses.reduce((sum, expense) => sum + expense.amount, 0)
   const totalPaid = expenses.reduce((sum, expense) => sum + sumLedgerAmountsForDirection(expense.ledgerEntries, 'OUT'), 0)
+  const overdueBillCount = expenses.reduce((sum, expense) => {
+    const dueDate = expense.dueDate ?? getEffectiveBillDate(expense)
+    const ledger = mapExpenseLedgerFields(expense.amount, expense.ledgerEntries)
+    const isOverdue = ledger.remaining > 0 && dueDate.getTime() < Date.now()
+    return sum + (isOverdue ? 1 : 0)
+  }, 0)
+  const paymentCount = expenses.reduce((sum, expense) => sum + expense.ledgerEntries.length, 0)
+
+  const lastBillAt = expenses.reduce<Date | null>((latest, expense) => {
+    const current = getEffectiveBillDate(expense)
+    if (!latest || current.getTime() > latest.getTime()) return current
+    return latest
+  }, null)
+
+  const lastPaymentAt = expenses
+    .flatMap((expense) => expense.ledgerEntries.map((entry) => entry.postedAt))
+    .reduce<Date | null>((latest, current) => {
+      if (!latest || current.getTime() > latest.getTime()) return current
+      return latest
+    }, null)
 
   return {
     totalBilled,
     totalPaid,
-    totalOutstanding: totalBilled - totalPaid,
+    totalOutstanding: openingBalanceAmount + totalBilled - totalPaid,
     billCount: expenses.length,
+    overdueBillCount,
+    paymentCount,
+    lastBillDate: toIsoOrNull(lastBillAt),
+    lastPaymentDate: toIsoOrNull(lastPaymentAt),
   }
 }
 
@@ -94,6 +166,7 @@ function mapVendorBill(expense: VendorExpenseRecord) {
     (left, right) => right.postedAt.getTime() - left.postedAt.getTime(),
   )
   const ledger = mapExpenseLedgerFields(expense.amount, ledgerEntries)
+  const dueDate = expense.dueDate ?? getEffectiveBillDate(expense)
 
   return {
     id: expense.id,
@@ -106,8 +179,12 @@ function mapVendorBill(expense: VendorExpenseRecord) {
     description: expense.description,
     reason: expense.reason,
     siteName: expense.site.name,
+    billNumber: expense.billNumber,
+    billDate: getEffectiveBillDate(expense).toISOString(),
+    dueDate: dueDate.toISOString(),
+    isOverdue: ledger.remaining > 0 && dueDate.getTime() < Date.now(),
+    documentCount: expense.vendorDocuments.length,
     createdAt: expense.createdAt.toISOString(),
-    billDate: expense.createdAt.toISOString(),
   }
 }
 
@@ -125,27 +202,127 @@ export function mapVendorPayments(expenses: VendorExpenseRecord[]) {
         amount: Number(payment.amount),
         direction: payment.direction,
         note: payment.note,
+        paymentMode: payment.paymentMode,
+        referenceNumber: payment.referenceNumber,
         siteId: expense.siteId,
         siteName: expense.site.name,
         description: expense.description,
         reason: expense.reason,
+        billNumber: expense.billNumber,
         createdAt: payment.postedAt.toISOString(),
         paymentDate: payment.postedAt.toISOString(),
+        receipt: payment.receipt
+          ? {
+              id: payment.receipt.id,
+              receiptNumber: payment.receipt.receiptNumber,
+              status: payment.receipt.status,
+              createdAt: payment.receipt.createdAt.toISOString(),
+            }
+          : null,
       })),
     )
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
 }
 
-export function buildVendorStatement(expenses: VendorExpenseRecord[]) {
+export function mapVendorReceipts(
+  vendor: {
+    id: string
+    name: string
+    type: string
+    contactPersonName: string | null
+    phone: string | null
+    email: string | null
+    address: string | null
+    gstin: string | null
+    pan: string | null
+  },
+  expenses: VendorExpenseRecord[],
+) {
+  return expenses
+    .flatMap((expense) =>
+      expense.ledgerEntries
+        .filter((payment) => payment.receipt && payment.direction === 'OUT')
+        .map((payment) => ({
+          id: payment.receipt!.id,
+          paymentId: payment.id,
+          expenseId: expense.id,
+          siteId: expense.siteId,
+          siteName: expense.site.name,
+          siteAddress: expense.site.address,
+          vendorId: vendor.id,
+          vendorName: vendor.name,
+          vendorType: vendor.type,
+          contactPersonName: vendor.contactPersonName,
+          vendorPhone: vendor.phone,
+          vendorEmail: vendor.email,
+          vendorAddress: vendor.address,
+          vendorGstin: vendor.gstin,
+          vendorPan: vendor.pan,
+          billNumber: expense.billNumber,
+          billAmount: expense.amount,
+          billDate: getEffectiveBillDate(expense).toISOString(),
+          dueDate: expense.dueDate?.toISOString() ?? null,
+          description: expense.description,
+          reason: expense.reason,
+          amount: Number(payment.amount),
+          paymentMode: payment.paymentMode,
+          referenceNumber: payment.referenceNumber,
+          note: payment.note,
+          date: payment.postedAt.toISOString(),
+          receiptNumber: payment.receipt!.receiptNumber,
+          status: payment.receipt!.status,
+          createdAt: payment.receipt!.createdAt.toISOString(),
+        })),
+    )
+    .sort((left, right) => right.date.localeCompare(left.date))
+}
+
+export function buildVendorStatement(
+  vendor: {
+    id: string
+    createdAt: Date
+    openingBalanceAmount: number
+    openingBalanceDate: Date | null
+  },
+  expenses: VendorExpenseRecord[],
+) {
   const entries: Array<VendorStatementRow & { sortDate: number; sortOrder: number }> = []
 
+  if (vendor.openingBalanceAmount > 0) {
+    const openingDate = vendor.openingBalanceDate ?? vendor.createdAt
+    entries.push({
+      id: `opening:${vendor.id}`,
+      entryType: 'OPENING_BALANCE',
+      referenceId: `opening-balance:${vendor.id}`,
+      expenseId: null,
+      date: openingDate.toISOString(),
+      billAmount: vendor.openingBalanceAmount,
+      paymentAmount: 0,
+      balance: 0,
+      description: 'Opening balance',
+      reason: null,
+      note: null,
+      siteId: null,
+      siteName: null,
+      billNumber: null,
+      dueDate: openingDate.toISOString(),
+      paymentMode: null,
+      referenceNumber: null,
+      sortDate: openingDate.getTime(),
+      sortOrder: 0,
+    })
+  }
+
   for (const expense of expenses) {
+    const billDate = getEffectiveBillDate(expense)
+    const dueDate = expense.dueDate ?? billDate
+
     entries.push({
       id: `bill:${expense.id}`,
       entryType: 'BILL',
       referenceId: expense.id,
       expenseId: expense.id,
-      date: expense.createdAt.toISOString(),
+      date: billDate.toISOString(),
       billAmount: expense.amount,
       paymentAmount: 0,
       balance: 0,
@@ -154,8 +331,12 @@ export function buildVendorStatement(expenses: VendorExpenseRecord[]) {
       note: null,
       siteId: expense.siteId,
       siteName: expense.site.name,
-      sortDate: expense.createdAt.getTime(),
-      sortOrder: 0,
+      billNumber: expense.billNumber,
+      dueDate: dueDate.toISOString(),
+      paymentMode: null,
+      referenceNumber: null,
+      sortDate: billDate.getTime(),
+      sortOrder: 1,
     })
 
     const paymentsAscending = [...expense.ledgerEntries].sort(
@@ -177,8 +358,12 @@ export function buildVendorStatement(expenses: VendorExpenseRecord[]) {
         reason: expense.reason,
         siteId: expense.siteId,
         siteName: expense.site.name,
+        billNumber: expense.billNumber,
+        dueDate: dueDate.toISOString(),
+        paymentMode: payment.paymentMode,
+        referenceNumber: payment.referenceNumber,
         sortDate: payment.postedAt.getTime(),
-        sortOrder: 1,
+        sortOrder: 2,
       })
     }
   }
@@ -198,7 +383,7 @@ export function buildVendorStatement(expenses: VendorExpenseRecord[]) {
   let runningBalance = 0
 
   const statement = entries.map(({ sortDate: _sortDate, sortOrder: _sortOrder, ...entry }) => {
-    if (entry.entryType === 'BILL') {
+    if (entry.entryType === 'OPENING_BALANCE' || entry.entryType === 'BILL') {
       runningBalance += entry.billAmount
     } else {
       runningBalance -= entry.paymentAmount
@@ -210,11 +395,11 @@ export function buildVendorStatement(expenses: VendorExpenseRecord[]) {
     }
   })
 
-  const summary = summarizeVendorRecords(expenses)
+  const summary = summarizeVendorRecords(expenses, vendor.openingBalanceAmount)
 
   return {
     statement,
-    totalBilled: summary.totalBilled,
+    totalBilled: summary.totalBilled + vendor.openingBalanceAmount,
     totalPaid: summary.totalPaid,
     closingBalance: summary.totalOutstanding,
   }

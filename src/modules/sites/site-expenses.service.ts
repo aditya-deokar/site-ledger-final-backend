@@ -11,6 +11,7 @@ import { createLedgerEntry } from '../../services/ledger.service.js'
 import { invalidateExpenseCaches, invalidateVendorCaches } from '../../services/cache-invalidation.js'
 import { cacheService } from '../../services/cache.service.js'
 import { CacheKeys, CacheTTL } from '../../config/cache-keys.js'
+import { createVendorReceiptForPayment } from '../../services/receipt.service.js'
 import { LEDGER_TX_OPTIONS } from '../../shared/constants/ledger.js'
 import { getSiteForUser } from './site-access.service.js'
 import { mapExpensePayment, mapSiteExpense } from './site-expenses.mapper.js'
@@ -80,30 +81,124 @@ export async function createExpenseForUser(
     reason?: string
     vendorId?: string
     description?: string
+    billNumber?: string
+    billDate?: string
+    dueDate?: string
     amount: number
     amountPaid?: number
     paymentDate?: string
+    paymentMode?: 'CASH' | 'CHEQUE' | 'BANK_TRANSFER' | 'UPI'
+    referenceNumber?: string
+    note?: string
     idempotencyKey?: string
   },
 ) {
   const { company, site } = await getSiteForUser(siteId, userId)
   if (!company || !site) return null
 
-  const { type, reason, vendorId, description, amount, amountPaid = 0, paymentDate, idempotencyKey } = data
+  const {
+    type,
+    reason,
+    vendorId,
+    description,
+    billNumber,
+    billDate,
+    dueDate,
+    amount,
+    amountPaid = 0,
+    paymentDate,
+    paymentMode,
+    referenceNumber,
+    note,
+    idempotencyKey,
+  } = data
+
+  let vendor:
+    | {
+        id: string
+        status: 'ACTIVE' | 'INACTIVE' | 'BLOCKED' | 'ARCHIVED'
+        paymentTermsDays: number | null
+      }
+    | null = null
+  let assignment:
+    | {
+        status: 'ACTIVE' | 'INACTIVE'
+        paymentTermsDaysOverride: number | null
+      }
+    | null = null
 
   if (type === 'VENDOR') {
     if (!vendorId) return { error: 'vendorId is required for vendor expenses', status: 400 as const }
-    const vendor = await prisma.vendor.findFirst({
+    vendor = await prisma.vendor.findFirst({
       where: { id: vendorId, companyId: company.id },
+      select: {
+        id: true,
+        status: true,
+        paymentTermsDays: true,
+      },
     })
     if (!vendor) return { error: 'Vendor not found', status: 404 as const }
+    if (vendor.status !== 'ACTIVE') {
+      return { error: 'This vendor is not active for new bills', status: 400 as const }
+    }
+
+    assignment = await prisma.vendorSiteAssignment.findUnique({
+      where: {
+        vendorId_siteId: {
+          vendorId: vendor.id,
+          siteId: site.id,
+        },
+      },
+      select: {
+        status: true,
+        paymentTermsDaysOverride: true,
+      },
+    })
+
+    if (assignment && assignment.status !== 'ACTIVE') {
+      return { error: 'This vendor is not active for the selected site', status: 400 as const }
+    }
   }
 
   if (amountPaid > amount) {
     return { error: 'AMOUNT_EXCEEDS_LIMIT', status: 400 as const }
   }
 
+  const resolvedBillDate = type === 'VENDOR'
+    ? (billDate ? new Date(billDate) : new Date())
+    : null
+  const resolvedDueDate = type === 'VENDOR'
+    ? (
+        dueDate
+          ? new Date(dueDate)
+          : new Date(
+              (resolvedBillDate ?? new Date()).getTime()
+              + (((assignment?.paymentTermsDaysOverride ?? vendor?.paymentTermsDays ?? 0) || 0) * 86400000),
+            )
+      )
+    : null
+
   const result = await prisma.$transaction(async (tx) => {
+    if (type === 'VENDOR' && vendorId && !assignment) {
+      await tx.vendorSiteAssignment.upsert({
+        where: {
+          vendorId_siteId: {
+            vendorId,
+            siteId: site.id,
+          },
+        },
+        update: {
+          status: 'ACTIVE',
+        },
+        create: {
+          vendorId,
+          siteId: site.id,
+          status: 'ACTIVE',
+          isPreferred: false,
+        },
+      })
+    }
+
     const expense = await tx.expense.create({
       data: {
         siteId: site.id,
@@ -111,11 +206,23 @@ export async function createExpenseForUser(
         reason: type === 'GENERAL' ? reason : null,
         vendorId: type === 'VENDOR' ? vendorId : null,
         description: type === 'VENDOR' ? description : null,
+        billNumber: type === 'VENDOR' ? billNumber?.trim() || null : null,
+        billDate: type === 'VENDOR' ? resolvedBillDate : null,
+        dueDate: type === 'VENDOR' ? resolvedDueDate : null,
         amount,
       },
     })
 
     let initialPaymentDate: string | null = null
+    let initialPayment: Awaited<ReturnType<typeof createLedgerEntry>> | null = null
+    let receipt:
+      | {
+          id: string
+          receiptNumber: string
+          status: 'ACTIVE' | 'VOIDED'
+          createdAt: string
+        }
+      | null = null
     if (amountPaid > 0) {
       const payment = await createLedgerEntry({
         companyId: company.id,
@@ -126,10 +233,23 @@ export async function createExpenseForUser(
         amount: new Prisma.Decimal(amountPaid),
         idempotencyKey: idempotencyKey ?? `expense-create:${expense.id}:${Date.now()}`,
         postedAt: paymentDate ? new Date(paymentDate) : undefined,
-        note: 'Initial payment upon recording expense',
+        note: note || 'Initial payment upon recording expense',
+        paymentMode,
+        referenceNumber: referenceNumber?.trim() || undefined,
         expenseId: expense.id,
       }, tx)
+      initialPayment = payment
       initialPaymentDate = payment.postedAt.toISOString()
+
+      if (expense.vendorId) {
+        const createdReceipt = await createVendorReceiptForPayment(payment.id, userId, tx)
+        receipt = {
+          id: createdReceipt.id,
+          receiptNumber: createdReceipt.receiptNumber,
+          status: createdReceipt.status,
+          createdAt: createdReceipt.createdAt.toISOString(),
+        }
+      }
     }
 
     const paidTotal = await getExpensePaidTotal(expense.id, tx)
@@ -137,7 +257,16 @@ export async function createExpenseForUser(
     const paymentStatus = deriveExpensePaymentStatus(paidTotal, expense.amount)
     const siteRemainingFund = await getSiteLedgerNetCash(site.id, tx)
 
-    return { expense, paidTotal, remaining, paymentStatus, paymentDate: initialPaymentDate, siteRemainingFund }
+    return {
+      expense,
+      initialPayment,
+      receipt,
+      paidTotal,
+      remaining,
+      paymentStatus,
+      paymentDate: initialPaymentDate,
+      siteRemainingFund,
+    }
   }, LEDGER_TX_OPTIONS)
 
   const expense = result.expense
@@ -153,6 +282,9 @@ export async function createExpenseForUser(
       reason: expense.reason,
       vendorId: expense.vendorId,
       description: expense.description,
+      billNumber: expense.billNumber,
+      billDate: (expense.billDate ?? expense.createdAt).toISOString(),
+      dueDate: (expense.dueDate ?? expense.billDate ?? expense.createdAt).toISOString(),
       amount: expense.amount,
       amountPaid: result.paidTotal,
       remaining: result.remaining,
@@ -160,6 +292,16 @@ export async function createExpenseForUser(
       paymentStatus: result.paymentStatus,
       createdAt: expense.createdAt.toISOString(),
     },
+    payment: result.initialPayment
+      ? {
+          id: result.initialPayment.id,
+          amount: Number(result.initialPayment.amount),
+          paymentMode: result.initialPayment.paymentMode,
+          referenceNumber: result.initialPayment.referenceNumber,
+          createdAt: result.initialPayment.postedAt.toISOString(),
+        }
+      : null,
+    receipt: result.receipt,
     siteRemainingFund: result.siteRemainingFund,
   }
 }
@@ -168,7 +310,14 @@ export async function updateExpensePaymentForUser(
   siteId: string,
   expenseId: string,
   userId: string,
-  data: { amount: number; note?: string; idempotencyKey?: string },
+  data: {
+    amount: number
+    note?: string
+    paymentMode?: 'CASH' | 'CHEQUE' | 'BANK_TRANSFER' | 'UPI'
+    referenceNumber?: string
+    paymentDate?: string
+    idempotencyKey?: string
+  },
 ) {
   const { site, company } = await getSiteForUser(siteId, userId)
   if (!site || !company) return null
@@ -194,14 +343,21 @@ export async function updateExpensePaymentForUser(
       amount: new Prisma.Decimal(data.amount),
       idempotencyKey: data.idempotencyKey ?? `expense-payment:${expenseId}:${Date.now()}`,
       note: data.note || 'Payment for expense',
+      paymentMode: data.paymentMode,
+      referenceNumber: data.referenceNumber?.trim() || undefined,
+      postedAt: data.paymentDate ? new Date(data.paymentDate) : undefined,
       expenseId,
     }, tx)
+
+    const receipt = expense.vendorId
+      ? await createVendorReceiptForPayment(payment.id, userId, tx)
+      : null
 
     const amountPaid = await getExpensePaidTotal(expenseId, tx)
     const remaining = await getExpenseRemaining(expenseId, tx)
     const paymentStatus = deriveExpensePaymentStatus(amountPaid, expense.amount)
 
-    return { payment, amountPaid, remaining, paymentStatus }
+    return { payment, receipt, amountPaid, remaining, paymentStatus }
   }, LEDGER_TX_OPTIONS)
 
   await invalidateExpenseCaches(company.id, site.id)
@@ -219,8 +375,18 @@ export async function updateExpensePaymentForUser(
     payment: {
       id: result.payment.id,
       amount: Number(result.payment.amount),
-      createdAt: result.payment.postedAt,
+      paymentMode: result.payment.paymentMode,
+      referenceNumber: result.payment.referenceNumber,
+      createdAt: result.payment.postedAt.toISOString(),
     },
+    receipt: result.receipt
+      ? {
+          id: result.receipt.id,
+          receiptNumber: result.receipt.receiptNumber,
+          status: result.receipt.status,
+          createdAt: result.receipt.createdAt.toISOString(),
+        }
+      : null,
   }
 }
 
@@ -237,7 +403,17 @@ export async function getExpensePaymentsForUser(siteId: string, expenseId: strin
       direction: true,
       movementType: true,
       note: true,
+      paymentMode: true,
+      referenceNumber: true,
       postedAt: true,
+      receipt: {
+        select: {
+          id: true,
+          receiptNumber: true,
+          status: true,
+          createdAt: true,
+        },
+      },
       reversalOfPaymentId: true,
     },
   })

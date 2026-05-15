@@ -121,6 +121,7 @@ export async function invalidateVendorCaches(companyId: string, vendorId?: strin
       cacheService.del(CacheKeys.vendorDetail(vendorId)),
       cacheService.del(CacheKeys.vendorTransactions(vendorId)),
       cacheService.del(CacheKeys.vendorPayments(vendorId)),
+      cacheService.del(CacheKeys.vendorReceipts(vendorId)),
       cacheService.del(CacheKeys.vendorStatement(vendorId)),
     )
   }

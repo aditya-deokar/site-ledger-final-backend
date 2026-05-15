@@ -45,7 +45,10 @@ export const addTransactionSchema = z.object({
   amount: z.number().positive(),
   note: z.string().optional(),
   amountPaid: z.number().min(0).optional().default(0),
-  paymentDate: z.string().datetime().optional(),
+  paymentDate: z.string().optional().refine(
+    (v) => !v || /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(v),
+    { message: 'Invalid datetime' },
+  ).transform((v) => (v && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(v) ? `${v}:00` : v)),
   idempotencyKey: z.string().optional(),
 })
 

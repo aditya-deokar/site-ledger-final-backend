@@ -11,6 +11,7 @@ type ReceiptDb = Prisma.TransactionClient | typeof prisma
 
 type CustomerReceiptSnapshot = {
   version: 1
+  entityType: 'CUSTOMER'
   company: {
     id: string
     name: string
@@ -50,6 +51,95 @@ type CustomerReceiptSnapshot = {
     date: string
   }
 }
+
+type VendorReceiptSnapshot = {
+  version: 1
+  entityType: 'VENDOR'
+  company: {
+    id: string
+    name: string
+    address: string | null
+  }
+  site: {
+    id: string | null
+    name: string | null
+    address: string | null
+  }
+  vendor: {
+    id: string
+    name: string
+    type: string
+    contactPersonName: string | null
+    phone: string | null
+    email: string | null
+    address: string | null
+    gstin: string | null
+    pan: string | null
+  }
+  expense: {
+    id: string
+    amount: number
+    billNumber: string | null
+    billDate: string | null
+    dueDate: string | null
+    description: string | null
+    reason: string | null
+  }
+  payment: {
+    id: string
+    amount: number
+    direction: 'IN' | 'OUT'
+    movementType: string
+    paymentMode: 'CASH' | 'CHEQUE' | 'BANK_TRANSFER' | 'UPI' | null
+    referenceNumber: string | null
+    note: string | null
+    date: string
+  }
+}
+
+type VendorReceiptPaymentRecord = Prisma.PaymentGetPayload<{
+  include: {
+    receipt: true
+    company: {
+      select: {
+        id: true
+        name: true
+        address: true
+      }
+    }
+    site: {
+      select: {
+        id: true
+        name: true
+        address: true
+      }
+    }
+    expense: {
+      select: {
+        id: true
+        amount: true
+        billNumber: true
+        billDate: true
+        dueDate: true
+        description: true
+        reason: true
+        vendor: {
+          select: {
+            id: true
+            name: true
+            type: true
+            contactPersonName: true
+            phone: true
+            email: true
+            address: true
+            gstin: true
+            pan: true
+          }
+        }
+      }
+    }
+  }
+}>
 
 function getFlatDisplayName(customFlatId: string | null, flatNumber: number | null) {
   return customFlatId || (flatNumber === null ? null : `Flat ${flatNumber}`)
@@ -146,6 +236,7 @@ function buildCustomerReceiptSnapshot(payment: NonNullable<Awaited<ReturnType<ty
 
   return {
     version: 1,
+    entityType: 'CUSTOMER',
     company: {
       id: payment.company.id,
       name: payment.company.name,
@@ -190,6 +281,109 @@ function buildCustomerReceiptSnapshot(payment: NonNullable<Awaited<ReturnType<ty
   }
 }
 
+async function getVendorPaymentForSnapshot(
+  paymentId: string,
+  db: ReceiptDb,
+): Promise<VendorReceiptPaymentRecord | null> {
+  const payment = await db.payment.findUnique({
+    where: { id: paymentId },
+    include: {
+      receipt: true,
+      company: {
+        select: {
+          id: true,
+          name: true,
+          address: true,
+        },
+      },
+      site: {
+        select: {
+          id: true,
+          name: true,
+          address: true,
+        },
+      },
+      expense: {
+        select: {
+          id: true,
+          amount: true,
+          billNumber: true,
+          billDate: true,
+          dueDate: true,
+          description: true,
+          reason: true,
+          vendor: {
+            select: {
+              id: true,
+              name: true,
+              type: true,
+              contactPersonName: true,
+              phone: true,
+              email: true,
+              address: true,
+              gstin: true,
+              pan: true,
+            },
+          },
+        },
+      },
+    },
+  })
+
+  return payment as VendorReceiptPaymentRecord | null
+}
+
+function buildVendorReceiptSnapshot(payment: VendorReceiptPaymentRecord): VendorReceiptSnapshot {
+  if (!payment.expense?.vendor) {
+    throw new Error('RECEIPT_VENDOR_REQUIRED')
+  }
+
+  return {
+    version: 1,
+    entityType: 'VENDOR',
+    company: {
+      id: payment.company.id,
+      name: payment.company.name,
+      address: payment.company.address,
+    },
+    site: {
+      id: payment.site?.id ?? payment.siteId ?? null,
+      name: payment.site?.name ?? null,
+      address: payment.site?.address ?? null,
+    },
+    vendor: {
+      id: payment.expense.vendor.id,
+      name: payment.expense.vendor.name,
+      type: payment.expense.vendor.type,
+      contactPersonName: payment.expense.vendor.contactPersonName,
+      phone: payment.expense.vendor.phone,
+      email: payment.expense.vendor.email,
+      address: payment.expense.vendor.address,
+      gstin: payment.expense.vendor.gstin,
+      pan: payment.expense.vendor.pan,
+    },
+    expense: {
+      id: payment.expense.id,
+      amount: payment.expense.amount,
+      billNumber: payment.expense.billNumber,
+      billDate: payment.expense.billDate?.toISOString() ?? null,
+      dueDate: payment.expense.dueDate?.toISOString() ?? null,
+      description: payment.expense.description,
+      reason: payment.expense.reason,
+    },
+    payment: {
+      id: payment.id,
+      amount: Number(payment.amount),
+      direction: payment.direction,
+      movementType: payment.movementType,
+      paymentMode: payment.paymentMode,
+      referenceNumber: payment.referenceNumber,
+      note: payment.note,
+      date: payment.postedAt.toISOString(),
+    },
+  }
+}
+
 export async function createCustomerReceiptForPayment(
   paymentId: string,
   createdByUserId: string,
@@ -210,6 +404,37 @@ export async function createCustomerReceiptForPayment(
 
   const receiptNumber = await getNextReceiptNumber(tx)
   const snapshot = buildCustomerReceiptSnapshot(payment)
+
+  return tx.receipt.create({
+    data: {
+      receiptNumber,
+      paymentId: payment.id,
+      snapshot: snapshot as Prisma.InputJsonValue,
+      createdByUserId,
+    },
+  })
+}
+
+export async function createVendorReceiptForPayment(
+  paymentId: string,
+  createdByUserId: string,
+  tx: Prisma.TransactionClient,
+) {
+  const payment = await getVendorPaymentForSnapshot(paymentId, tx)
+  if (!payment) {
+    throw new Error('PAYMENT_NOT_FOUND')
+  }
+
+  if (payment.receipt) {
+    return payment.receipt
+  }
+
+  if (payment.movementType !== 'EXPENSE_PAYMENT' || payment.direction !== 'OUT' || !payment.expense?.vendor) {
+    throw new Error('RECEIPT_NOT_SUPPORTED')
+  }
+
+  const receiptNumber = await getNextReceiptNumber(tx)
+  const snapshot = buildVendorReceiptSnapshot(payment)
 
   return tx.receipt.create({
     data: {

@@ -101,6 +101,8 @@ model Site {
   wings       Wing[]
   investors   Investor[]
   payments    Payment[]
+  vendorAssignments VendorSiteAssignment[]
+  vendorDocuments   VendorDocument[]
   company     Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
 }
 
@@ -119,32 +121,90 @@ model Wing {
 }
 
 model Vendor {
-  id        String    @id @default(cuid())
-  companyId String
-  name      String
-  type      String
-  phone     String?
-  email     String?
-  isDeleted Boolean   @default(false)
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  expenses  Expense[]
-  company   Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  id                  String                    @id @default(cuid())
+  companyId           String
+  name                String
+  type                String
+  status              VendorStatus             @default(ACTIVE)
+  contactPersonName   String?
+  phone               String?
+  email               String?
+  address             String?
+  gstin               String?
+  pan                 String?
+  bankAccountName     String?
+  bankName            String?
+  accountNumber       String?
+  ifscCode            String?
+  upiId               String?
+  paymentTermsDays    Int?
+  notes               String?
+  openingBalanceAmount Float                    @default(0)
+  openingBalanceDate  DateTime?
+  isDeleted           Boolean                   @default(false)
+  createdAt           DateTime                  @default(now())
+  updatedAt           DateTime                  @updatedAt
+  expenses            Expense[]
+  assignments         VendorSiteAssignment[]
+  documents           VendorDocument[]
+  company             Company                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, status, createdAt])
 }
 
 model Expense {
-  id            String      @id @default(cuid())
-  siteId        String
-  type          ExpenseType
-  reason        String?
-  vendorId      String?
-  description   String?
-  amount        Float
-  isDeleted     Boolean     @default(false)
-  createdAt     DateTime    @default(now())
-  ledgerEntries Payment[]   @relation("ExpenseLedgerEntries")
-  site          Site        @relation(fields: [siteId], references: [id], onDelete: Cascade)
-  vendor        Vendor?     @relation(fields: [vendorId], references: [id])
+  id              String           @id @default(cuid())
+  siteId          String
+  type            ExpenseType
+  reason          String?
+  vendorId        String?
+  description     String?
+  billNumber      String?
+  billDate        DateTime?
+  dueDate         DateTime?
+  amount          Float
+  isDeleted       Boolean          @default(false)
+  createdAt       DateTime         @default(now())
+  ledgerEntries   Payment[]        @relation("ExpenseLedgerEntries")
+  site            Site             @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  vendor          Vendor?          @relation(fields: [vendorId], references: [id])
+  vendorDocuments VendorDocument[]
+}
+
+model VendorSiteAssignment {
+  id                      String                    @id @default(cuid())
+  vendorId                String
+  siteId                  String
+  status                  VendorSiteAssignmentStatus @default(ACTIVE)
+  isPreferred             Boolean                   @default(false)
+  paymentTermsDaysOverride Int?
+  notes                   String?
+  createdAt               DateTime                  @default(now())
+  updatedAt               DateTime                  @updatedAt
+  vendor                  Vendor                    @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  site                    Site                      @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@unique([vendorId, siteId])
+  @@index([siteId, status, createdAt])
+}
+
+model VendorDocument {
+  id           String   @id @default(cuid())
+  vendorId     String
+  siteId       String?
+  expenseId    String?
+  documentType String
+  documentName String
+  fileUrl      String
+  note         String?
+  uploadedAt   DateTime @default(now())
+  vendor       Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  site         Site?    @relation(fields: [siteId], references: [id], onDelete: SetNull)
+  expense      Expense? @relation(fields: [expenseId], references: [id], onDelete: SetNull)
+
+  @@index([vendorId, uploadedAt])
+  @@index([expenseId])
+  @@index([siteId])
 }
 
 model Floor {
@@ -432,6 +492,18 @@ model SalaryReminder {
 enum ExpenseType {
   GENERAL
   VENDOR
+}
+
+enum VendorStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+  ARCHIVED
+}
+
+enum VendorSiteAssignmentStatus {
+  ACTIVE
+  INACTIVE
 }
 
 enum FlatStatus {

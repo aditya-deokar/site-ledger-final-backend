@@ -42,6 +42,7 @@ export const CacheKeys = {
   vendorDetail: (vendorId: string) => `gaa:vendors:detail:${vendorId}`,
   vendorTransactions: (vendorId: string) => `gaa:vendors:txns:${vendorId}`,
   vendorPayments: (vendorId: string) => `gaa:vendors:payments:${vendorId}`,
+  vendorReceipts: (vendorId: string) => `gaa:vendors:receipts:${vendorId}`,
   vendorStatement: (vendorId: string) => `gaa:vendors:statement:${vendorId}`,
   customerList: (companyId: string) => `gaa:customers:list:${companyId}`,
   flatCustomer: (flatId: string) => `gaa:customers:flat:${flatId}`,

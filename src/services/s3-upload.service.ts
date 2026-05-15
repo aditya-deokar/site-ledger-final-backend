@@ -4,7 +4,14 @@ import { loadEnv } from '../config/env.js'
 const env = loadEnv()
 
 const MAX_COMPANY_LOGO_BYTES = 5 * 1024 * 1024
+const MAX_VENDOR_DOCUMENT_BYTES = 10 * 1024 * 1024
 const ALLOWED_MIME_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+])
+const ALLOWED_VENDOR_DOCUMENT_MIME_TYPES = new Set([
+  'application/pdf',
   'image/png',
   'image/jpeg',
   'image/webp',
@@ -55,6 +62,8 @@ function getFileExtension(file: File) {
       return '.jpg'
     case 'image/webp':
       return '.webp'
+    case 'application/pdf':
+      return '.pdf'
     default:
       return ''
   }
@@ -95,26 +104,58 @@ function assertS3Config() {
   }
 }
 
-function validateLogoFile(file: File) {
-  if (!ALLOWED_MIME_TYPES.has(file.type)) {
-    throw new LogoUploadError('Only PNG, JPG, JPEG, and WEBP logo files are supported.', 400)
+type S3UploadOptions = {
+  allowedMimeTypes: Set<string>
+  maxBytes: number
+  invalidTypeMessage: string
+  emptyMessage: string
+  tooLargeMessage: string
+  keyPrefix: string
+  uploadFailureLabel: string
+  loadFailureLabel: string
+}
+
+const companyLogoUploadOptions: S3UploadOptions = {
+  allowedMimeTypes: ALLOWED_MIME_TYPES,
+  maxBytes: MAX_COMPANY_LOGO_BYTES,
+  invalidTypeMessage: 'Only PNG, JPG, JPEG, and WEBP logo files are supported.',
+  emptyMessage: 'The selected logo file is empty.',
+  tooLargeMessage: 'Logo file must be 5 MB or smaller.',
+  keyPrefix: 'company-logos',
+  uploadFailureLabel: 'logo',
+  loadFailureLabel: 'logo',
+}
+
+const vendorDocumentUploadOptions: S3UploadOptions = {
+  allowedMimeTypes: ALLOWED_VENDOR_DOCUMENT_MIME_TYPES,
+  maxBytes: MAX_VENDOR_DOCUMENT_BYTES,
+  invalidTypeMessage: 'Only PDF, PNG, JPG, JPEG, and WEBP vendor documents are supported.',
+  emptyMessage: 'The selected vendor document is empty.',
+  tooLargeMessage: 'Vendor document must be 10 MB or smaller.',
+  keyPrefix: 'vendor-documents',
+  uploadFailureLabel: 'vendor document',
+  loadFailureLabel: 'vendor document',
+}
+
+function validateFile(file: File, options: S3UploadOptions) {
+  if (!options.allowedMimeTypes.has(file.type)) {
+    throw new LogoUploadError(options.invalidTypeMessage, 400)
   }
 
   if (file.size <= 0) {
-    throw new LogoUploadError('The selected logo file is empty.', 400)
+    throw new LogoUploadError(options.emptyMessage, 400)
   }
 
-  if (file.size > MAX_COMPANY_LOGO_BYTES) {
-    throw new LogoUploadError('Logo file must be 5 MB or smaller.', 400)
+  if (file.size > options.maxBytes) {
+    throw new LogoUploadError(options.tooLargeMessage, 400)
   }
 }
 
-export async function uploadCompanyLogoToS3(file: File, userId: string) {
-  validateLogoFile(file)
-
+async function uploadFileToS3(file: File, userId: string, options: S3UploadOptions) {
+  validateFile(file, options)
   const { accessKeyId, secretAccessKey, sessionToken, region, bucket } = assertS3Config()
   const extension = getFileExtension(file)
-  const key = `company-logos/${userId}/${Date.now()}-${randomUUID()}${extension}`
+  const key = `${options.keyPrefix}/${userId}/${Date.now()}-${randomUUID()}${extension}`
   const encodedKey = encodeKeyPath(key)
   const host = getS3Host(bucket, region)
   const uploadUrl = `https://${host}/${encodedKey}`
@@ -179,7 +220,7 @@ export async function uploadCompanyLogoToS3(file: File, userId: string) {
   if (!response.ok) {
     const responseText = await response.text().catch(() => '')
     throw new LogoUploadError(
-      `Failed to upload logo to S3${responseText ? `: ${responseText}` : '.'}`,
+      `Failed to upload ${options.uploadFailureLabel} to S3${responseText ? `: ${responseText}` : '.'}`,
       502,
     )
   }
@@ -188,6 +229,14 @@ export async function uploadCompanyLogoToS3(file: File, userId: string) {
     key,
     url: buildPublicUrl(key, bucket, region),
   }
+}
+
+export async function uploadCompanyLogoToS3(file: File, userId: string) {
+  return uploadFileToS3(file, userId, companyLogoUploadOptions)
+}
+
+export async function uploadVendorDocumentToS3(file: File, userId: string) {
+  return uploadFileToS3(file, userId, vendorDocumentUploadOptions)
 }
 
 export function extractCompanyLogoKey(value?: string | null) {
@@ -219,6 +268,10 @@ export function buildCompanyLogoProxyUrl(key: string, requestOrigin: string) {
   return `${requestOrigin}/api/uploads/company-logo?key=${encodeURIComponent(key)}`
 }
 
+export function buildVendorDocumentProxyUrl(key: string, requestOrigin: string) {
+  return `${requestOrigin}/api/uploads/vendor-document?key=${encodeURIComponent(key)}`
+}
+
 export function resolveCompanyLogoUrl(value: string | null | undefined, requestOrigin: string) {
   const key = extractCompanyLogoKey(value)
   if (!key) {
@@ -228,7 +281,7 @@ export function resolveCompanyLogoUrl(value: string | null | undefined, requestO
   return buildCompanyLogoProxyUrl(key, requestOrigin)
 }
 
-export async function getCompanyLogoFromS3(key: string) {
+async function getFileFromS3(key: string, options: S3UploadOptions) {
   const { accessKeyId, secretAccessKey, sessionToken, region, bucket } = assertS3Config()
   const host = getS3Host(bucket, region)
   const objectUrl = getObjectUrl(key, bucket, region)
@@ -288,10 +341,18 @@ export async function getCompanyLogoFromS3(key: string) {
   if (!response.ok) {
     const responseText = await response.text().catch(() => '')
     throw new LogoUploadError(
-      `Failed to load logo from S3${responseText ? `: ${responseText}` : '.'}`,
+      `Failed to load ${options.loadFailureLabel} from S3${responseText ? `: ${responseText}` : '.'}`,
       response.status === 404 ? 404 : 502,
     )
   }
 
   return response
+}
+
+export async function getCompanyLogoFromS3(key: string) {
+  return getFileFromS3(key, companyLogoUploadOptions)
+}
+
+export async function getVendorDocumentFromS3(key: string) {
+  return getFileFromS3(key, vendorDocumentUploadOptions)
 }
