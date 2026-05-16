@@ -215,3 +215,58 @@ export async function deletePartnerForUser(partnerId: string, userId: string) {
 
   return { message: `Partner ${existing.name} removed` }
 }
+
+export async function getPartnerLedgerForUser(partnerId: string, userId: string) {
+  const company = await requireCompanyForUser(userId, 'No company found')
+  if (isCompanyServiceError(company)) return company
+
+  const partner = await prisma.partner.findFirst({
+    where: { id: partnerId, companyId: company.id },
+  })
+  if (!partner) return { error: 'Partner not found', status: 404 }
+
+  const payments = await prisma.payment.findMany({
+    where: { partnerId, companyId: company.id },
+    orderBy: { postedAt: 'desc' },
+    select: {
+      id: true,
+      amount: true,
+      direction: true,
+      movementType: true,
+      note: true,
+      postedAt: true,
+      reversalOfPaymentId: true,
+    },
+  })
+
+  const totalIn = payments
+    .filter((p) => p.direction === 'IN')
+    .reduce((s, p) => s + Number(p.amount), 0)
+  const totalOut = payments
+    .filter((p) => p.direction === 'OUT')
+    .reduce((s, p) => s + Number(p.amount), 0)
+
+  return {
+    partner: {
+      id: partner.id,
+      name: partner.name,
+      email: partner.email,
+      phone: partner.phone,
+      stakePercentage: partner.stakePercentage,
+    },
+    summary: {
+      totalIn,
+      totalOut,
+      netCapital: totalIn - totalOut,
+    },
+    entries: payments.map((p) => ({
+      id: p.id,
+      amount: Number(p.amount),
+      direction: p.direction,
+      movementType: p.movementType,
+      note: p.note,
+      reversalOfPaymentId: p.reversalOfPaymentId,
+      date: p.postedAt.toISOString(),
+    })),
+  }
+}

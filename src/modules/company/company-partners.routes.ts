@@ -5,6 +5,7 @@ import { createPartnerSchema, errorResponseSchema, updatePartnerSchema } from '.
 import {
   addPartnerForUser,
   deletePartnerForUser,
+  getPartnerLedgerForUser,
   getPartnersForUser,
   updatePartnerForUser,
 } from './company-partners.service.js'
@@ -223,6 +224,68 @@ export function registerCompanyPartnerRoutes(companyRoutes: CompanyRouteApp) {
     const { id } = c.req.valid('param')
 
     const result = await deletePartnerForUser(id, auth.userId)
+    if (isCompanyServiceError(result)) return jsonError(c, result.error, result.status) as any
+
+    return jsonOk(c, result) as any
+  })
+
+  // ── GET /partners/{id}/ledger ─────────────────────────────────────────────
+  const getPartnerLedgerRoute = createRoute({
+    method: 'get',
+    path: '/partners/{id}/ledger',
+    tags: ['Partners'],
+    summary: 'Get partner capital ledger',
+    description: 'Returns all capital transactions (in/out) for a specific partner with a running summary.',
+    security: [{ bearerAuth: [] }],
+    request: {
+      params: z.object({ id: z.string() }),
+    },
+    responses: {
+      200: {
+        content: {
+          'application/json': {
+            schema: z.object({
+              ok: z.literal(true),
+              data: z.object({
+                partner: z.object({
+                  id: z.string(),
+                  name: z.string(),
+                  email: z.string().nullable(),
+                  phone: z.string().nullable(),
+                  stakePercentage: z.number(),
+                }),
+                summary: z.object({
+                  totalIn: z.number(),
+                  totalOut: z.number(),
+                  netCapital: z.number(),
+                }),
+                entries: z.array(z.object({
+                  id: z.string(),
+                  amount: z.number(),
+                  direction: z.enum(['IN', 'OUT']),
+                  movementType: z.string(),
+                  note: z.string().nullable(),
+                  reversalOfPaymentId: z.string().nullable(),
+                  date: z.string().datetime(),
+                })),
+              }),
+            }),
+          },
+        },
+        description: 'Partner ledger entries',
+      },
+      404: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Partner not found',
+      },
+    },
+  })
+
+  companyRoutes.openapi(getPartnerLedgerRoute, async (c) => {
+    const auth = c.get('auth')
+    const { id } = c.req.valid('param')
+
+    const result = await getPartnerLedgerForUser(id, auth.userId)
     if (isCompanyServiceError(result)) return jsonError(c, result.error, result.status) as any
 
     return jsonOk(c, result) as any

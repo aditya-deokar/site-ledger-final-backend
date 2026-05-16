@@ -97,3 +97,7 @@ export const withdrawalPaymentSchema = z.object({
   note: z.string().optional(),
   idempotencyKey: z.string().optional(),
 })
+
+export const updateWithdrawalSchema = z.object({
+  note: z.string().optional(),
+})

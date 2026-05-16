@@ -250,3 +250,52 @@ export async function getCompanyWithdrawalPaymentsForUser(withdrawalId: string, 
     })),
   }
 }
+
+export async function updateCompanyWithdrawalNoteForUser(
+  withdrawalId: string,
+  userId: string,
+  data: { note?: string },
+) {
+  const { company, withdrawal } = await getCompanyWithdrawalForUser(withdrawalId, userId)
+  if (!company || !withdrawal) return { error: 'Withdrawal not found', status: 404 }
+
+  const updated = await prisma.companyWithdrawal.update({
+    where: { id: withdrawalId },
+    data: { note: data.note ?? null },
+    include: {
+      ledgerEntries: {
+        select: { amount: true, direction: true, postedAt: true },
+        orderBy: { postedAt: 'desc' },
+      },
+    },
+  })
+
+  await invalidateWithdrawalCaches(company.id)
+
+  return {
+    withdrawal: mapCompanyWithdrawalResponse(updated as CompanyWithdrawalWithLedger),
+  }
+}
+
+export async function deleteCompanyWithdrawalForUser(withdrawalId: string, userId: string) {
+  const { company, withdrawal } = await getCompanyWithdrawalForUser(withdrawalId, userId)
+  if (!company || !withdrawal) return { error: 'Withdrawal not found', status: 404 }
+
+  // Block deletion if any payments have been made against this withdrawal
+  const paidTotal = await getCompanyWithdrawalPaidTotal(withdrawalId)
+  if (paidTotal > 0) {
+    return {
+      error: 'Cannot delete a withdrawal that has payments recorded. Use the note to mark it as void instead.',
+      status: 400,
+    }
+  }
+
+  await prisma.companyWithdrawal.update({
+    where: { id: withdrawalId },
+    data: { isDeleted: true },
+  })
+
+  await invalidateWithdrawalCaches(company.id)
+
+  return { message: 'Withdrawal deleted' }
+}

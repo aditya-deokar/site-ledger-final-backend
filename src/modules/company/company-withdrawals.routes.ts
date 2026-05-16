@@ -6,13 +6,16 @@ import {
   withdrawalPaymentSchema,
   withdrawalResponseSchema,
   withdrawSchema,
+  updateWithdrawalSchema,
 } from './company.schema.js'
 import {
   addCompanyWithdrawalPaymentForUser,
   createCompanyWithdrawalForUser,
+  deleteCompanyWithdrawalForUser,
   getCompanyWithdrawalDetailForUser,
   getCompanyWithdrawalPaymentsForUser,
   getCompanyWithdrawalsForUser,
+  updateCompanyWithdrawalNoteForUser,
 } from './company-withdrawals.service.js'
 import { isCompanyServiceError } from './company.service.js'
 
@@ -251,6 +254,94 @@ export function registerCompanyWithdrawalRoutes(companyRoutes: CompanyRouteApp) 
     const { id } = c.req.valid('param')
 
     const result = await getCompanyWithdrawalPaymentsForUser(id, auth.userId)
+    if (isCompanyServiceError(result)) return jsonError(c, result.error, result.status) as any
+
+    return jsonOk(c, result) as any
+  })
+
+  // ── PATCH /withdrawals/{id} — update note ─────────────────────────────────
+  const updateWithdrawalRoute = createRoute({
+    method: 'patch',
+    path: '/withdrawals/{id}',
+    tags: ['Company'],
+    summary: 'Update withdrawal note',
+    description: 'Update the note/description on an existing company withdrawal.',
+    security: [{ bearerAuth: [] }],
+    request: {
+      params: z.object({ id: z.string() }),
+      body: { content: { 'application/json': { schema: updateWithdrawalSchema } } },
+    },
+    responses: {
+      200: {
+        content: {
+          'application/json': {
+            schema: z.object({
+              ok: z.literal(true),
+              data: z.object({ withdrawal: withdrawalResponseSchema }),
+            }),
+          },
+        },
+        description: 'Withdrawal updated',
+      },
+      404: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Withdrawal not found',
+      },
+    },
+  })
+
+  companyRoutes.openapi(updateWithdrawalRoute, async (c) => {
+    const auth = c.get('auth')
+    const { id } = c.req.valid('param')
+    const body = await c.req.json().catch(() => null)
+    const parsed = updateWithdrawalSchema.safeParse(body)
+    if (!parsed.success) return jsonError(c, 'Invalid request body', 400) as any
+
+    const result = await updateCompanyWithdrawalNoteForUser(id, auth.userId, parsed.data)
+    if (isCompanyServiceError(result)) return jsonError(c, result.error, result.status) as any
+
+    return jsonOk(c, result) as any
+  })
+
+  // ── DELETE /withdrawals/{id} ──────────────────────────────────────────────
+  const deleteWithdrawalRoute = createRoute({
+    method: 'delete',
+    path: '/withdrawals/{id}',
+    tags: ['Company'],
+    summary: 'Delete a company withdrawal',
+    description: 'Soft-delete a withdrawal. Only allowed if no payments have been recorded against it.',
+    security: [{ bearerAuth: [] }],
+    request: {
+      params: z.object({ id: z.string() }),
+    },
+    responses: {
+      200: {
+        content: {
+          'application/json': {
+            schema: z.object({
+              ok: z.literal(true),
+              data: z.object({ message: z.string() }),
+            }),
+          },
+        },
+        description: 'Withdrawal deleted',
+      },
+      400: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Cannot delete — payments exist',
+      },
+      404: {
+        content: { 'application/json': { schema: errorResponseSchema } },
+        description: 'Withdrawal not found',
+      },
+    },
+  })
+
+  companyRoutes.openapi(deleteWithdrawalRoute, async (c) => {
+    const auth = c.get('auth')
+    const { id } = c.req.valid('param')
+
+    const result = await deleteCompanyWithdrawalForUser(id, auth.userId)
     if (isCompanyServiceError(result)) return jsonError(c, result.error, result.status) as any
 
     return jsonOk(c, result) as any
